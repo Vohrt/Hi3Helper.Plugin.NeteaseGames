@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -66,7 +67,7 @@ public sealed class NeteaseGamesDownloader
     {
         _httpClient = httpClient;
         _contentRoots = contentRoots is null
-            ? [NeteaseGamesEndpoints.ContentHostUrl]
+            ? [NeteaseGamesEndpoints.ContentHostUrl, .. NeteaseGamesContentEndpoints.ContentMirrorHosts.Select(h => "https://" + h + "/")]
             : [.. contentRoots];
     }
 
@@ -74,9 +75,12 @@ public sealed class NeteaseGamesDownloader
     public IReadOnlyList<Uri> BuildUris(string relativePath)
     {
         List<Uri> uris = [];
+        DateTimeOffset now = DateTimeOffset.UtcNow;
         foreach (string root in _contentRoots)
         {
-            uris.Add(new Uri(root.TrimEnd('/') + "/" + relativePath.TrimStart('/')));
+            string url = root.TrimEnd('/') + "/" + relativePath.TrimStart('/');
+            // Every content request has to be signed, otherwise the edge answers with 403.
+            uris.Add(new Uri(NeteaseGamesUrlSigner.Sign(url, now)));
         }
 
         return uris;

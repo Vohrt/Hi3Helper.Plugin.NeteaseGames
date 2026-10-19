@@ -47,7 +47,7 @@ public static class NeteaseGamesEndpoints
     /// <summary>
     ///     The content host that serves the game payload (<c>gph_url</c> in <c>config.xml</c>).
     /// </summary>
-    public const string ContentHostUrl = "https://h74.gdl.netease.com/";
+    public const string ContentHostUrl = "https://h74.gph.netease.com/";
 
     /// <summary>
     ///     The host that serves the per-file web assets (<c>*.fp.ps.netease.com</c>).
