@@ -291,6 +291,20 @@ public static class NeteaseGamesGameLauncher
                 staged = executable;
             }
 
+            // The staged copy lives outside of the directory that holds the game libraries, so the loader
+            // cannot find them ("CrashHunter_PC3.dll") and the start fails with a system error dialog.
+            // The launcher therefore puts the binary directory on the search path of the child process.
+            string? previousPath = Environment.GetEnvironmentVariable("PATH");
+            try
+            {
+                Environment.SetEnvironmentVariable("PATH",
+                    $"{Path.GetDirectoryName(executable)}{Path.PathSeparator}{previousPath}");
+            }
+            catch (Exception)
+            {
+                // A missing search path is not fatal, the start reports the problem itself.
+            }
+
             ProcessStartInfo startInfo = new(staged)
             {
                 // The working directory is part of the contract: the game resolves the staged copy relative
@@ -313,7 +327,12 @@ public static class NeteaseGamesGameLauncher
             }
             catch (Exception)
             {
+                RestorePath(previousPath);
                 return false;
+            }
+            finally
+            {
+                RestorePath(previousPath);
             }
 
             if (process is null)
@@ -336,6 +355,21 @@ public static class NeteaseGamesGameLauncher
 
             await WaitForGameExitAsync(gamePath, token).ConfigureAwait(false);
             return true;
+        }
+    }
+
+    /// <summary>
+    ///     Restores the search path of the host process.
+    /// </summary>
+    private static void RestorePath(string? path)
+    {
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", path);
+        }
+        catch (Exception)
+        {
+            // Ignore, the path is restored on the next start anyway.
         }
     }
 
