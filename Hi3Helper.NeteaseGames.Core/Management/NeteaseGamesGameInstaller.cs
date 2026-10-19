@@ -142,42 +142,51 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         CancellationToken token)
     {
         string gamePath = EnsureAndGetGamePath();
-        string staging = Path.Combine(gamePath, NeteaseGamesPaths.PatchDirectoryRelativePath, StagingDirectoryName);
-        Directory.CreateDirectory(staging);
-
         progressStateDelegate?.Invoke(InstallProgressState.Preparing);
 
-        NeteaseGamesDownloadPlan? plan = await BuildUpdatePlanAsync(token).ConfigureAwait(false);
-        if (plan is null || plan.Items.Count == 0)
+        NeteaseGamesGameManager? manager = _manager;
+        NeteaseGamesPatchManifest? manifest = manager?.RemotePatchManifest;
+        if (manager is null || manifest is null)
         {
             progressStateDelegate?.Invoke(InstallProgressState.Completed);
             return;
         }
 
+        // The engine (the mini pack) is a separate download that the official launcher performs first; the
+        // location of its blocks on the content host is not known yet, so it is reported instead of being
+        // downloaded with a wrong URL.
+        if (manager.RemotePackageVersion > 0)
+        {
+            SharedStatic.InstanceLogger?.LogInformation(
+                "[NeteaseGames] Engine mini pack {Version} is not part of the patch download yet",
+                manifest.EngineVersion);
+        }
+
+        NeteaseGamesPatchList? localList = NeteaseGamesLocalState.ReadPatchList(gamePath);
+        NeteaseGamesPatchList remoteList = await manager
+            .FetchRemotePatchListAsync(manifest.BaseVersion, token).ConfigureAwait(false);
+
         progressStateDelegate?.Invoke(InstallProgressState.Download);
 
-        NeteaseGamesDownloader downloader = new(CreateHttpClient());
-        long totalBytes = plan.TotalSize;
-        long downloadedBytes = 0;
-        int downloadedCount = 0;
-
-        foreach (NeteaseGamesDownloadItem item in plan.Items)
+        long total = 0;
+        foreach ((string _, NeteaseGamesPackageEntry package) in remoteList.Packages)
         {
-            token.ThrowIfCancellationRequested();
+            total += package.TotalSize;
+        }
 
-            long itemStart = downloadedBytes;
-            bool ok = await downloader.DownloadAsync(
-                item,
-                bytes => ReportProgress(progressDelegate, itemStart + bytes, totalBytes, downloadedCount, plan.Items.Count),
-                token).ConfigureAwait(false);
+        bool ok = await NeteaseGamesUpdateApplier.ApplyAsync(
+            CreateHttpClient(),
+            gamePath,
+            localList,
+            remoteList,
+            manifest.BaseVersion,
+            (int)manager.RemotePackageVersion,
+            bytes => ReportProgress(progressDelegate, bytes, total, 0, 1),
+            token).ConfigureAwait(false);
 
-            if (!ok)
-            {
-                throw new IOException($"Failed to download '{item.RelativePath}'.");
-            }
-
-            downloadedBytes += item.ExpectedSize;
-            downloadedCount++;
+        if (!ok)
+        {
+            throw new IOException("The patch could not be applied.");
         }
 
         progressStateDelegate?.Invoke(InstallProgressState.Verify);
