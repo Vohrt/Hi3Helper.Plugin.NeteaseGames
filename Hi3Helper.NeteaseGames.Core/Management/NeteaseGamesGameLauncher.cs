@@ -4,7 +4,9 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
+using Microsoft.Extensions.Logging;
 using System.Threading.Tasks;
+using Hi3Helper.Plugin.Core;
 using Hi3Helper.Plugin.Core.Utility;
 
 namespace Hi3Helper.NeteaseGames.Core.Management;
@@ -353,8 +355,92 @@ public static class NeteaseGamesGameLauncher
                 }
             }
 
+            // The staged copy only hands the start over to the real game process once the launcher session
+            // reaches it. Without that session it keeps running with a few megabytes and never starts the
+            // game, so the start is reported instead of waiting forever.
+            if (!await WaitForGameProcessAsync(gamePath, TimeSpan.FromSeconds(60), token).ConfigureAwait(false))
+            {
+                SharedStatic.InstanceLogger?.LogError(
+                    "[NeteaseGames] The game did not start: the staged copy did not receive a launcher session");
+                TryKillStagedCopy(gamePath);
+                return false;
+            }
+
             await WaitForGameExitAsync(gamePath, token).ConfigureAwait(false);
             return true;
+        }
+    }
+
+    /// <summary>
+    ///     Waits until the real game process (<c>ywzh_.exe</c>) shows up.
+    /// </summary>
+    private static async Task<bool> WaitForGameProcessAsync(
+        string gameDirectory, TimeSpan timeout, CancellationToken token)
+    {
+        string staged = Path.GetFileNameWithoutExtension(NeteaseGamesPaths.StagedGameExecutableName);
+        DateTime deadline = DateTime.UtcNow + timeout;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                await Task.Delay(1000, token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+
+            foreach (Process candidate in Process.GetProcessesByName(staged))
+            {
+                try
+                {
+                    if (candidate.WorkingSet64 > 64 * 1024 * 1024)
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception)
+                {
+                    // The process may have exited in the meantime.
+                }
+                finally
+                {
+                    candidate.Dispose();
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    ///     Kills the staged copy that is still waiting for the launcher session.
+    /// </summary>
+    private static void TryKillStagedCopy(string gameDirectory)
+    {
+        try
+        {
+            string staged = Path.GetFileNameWithoutExtension(NeteaseGamesPaths.LauncherMarkerRelativePath);
+            foreach (Process process in Process.GetProcessesByName(staged))
+            {
+                try
+                {
+                    process.Kill();
+                }
+                catch (Exception)
+                {
+                    // The process may already be gone.
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Killing the staged copy is best effort.
         }
     }
 
