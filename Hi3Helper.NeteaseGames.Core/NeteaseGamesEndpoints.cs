@@ -70,29 +70,49 @@ public static class NeteaseGamesEndpoints
     public const string NoticeImageBaseUrl = "https://h74.update.netease.com/game_notice/image/";
 
     /// <summary>
-    ///     Name of the remote mini-pack manifest (<c>minipack_list</c> in <c>config.xml</c>).
+    ///     The prefix that the official launcher puts in front of the branch based manifests
+    ///     (<c>launcher_prefix</c> / <c>minipack_prefix</c> / <c>notice_prefix</c> in <c>config.xml</c>).
+    ///     <para>
+    ///         Without it the server answers with the stale "release" branch, with it the current one is
+    ///         returned (e.g. <c>OB_release_mini_pack_version.json</c>).
+    ///     </para>
     /// </summary>
-    public const string MiniPackListName = "release_release_mini_pack_version.json";
+    public const string ManifestPrefix = "OB";
 
     /// <summary>
-    ///     Name of the remote launcher version manifest (<c>launcher_list</c> in <c>config.xml</c>).
+    ///     The branch of the manifests (<c>minipack_branch</c> in <c>config.xml</c>).
     /// </summary>
-    public const string LauncherListName = "release_launcher_version.json";
+    public const string ManifestBranch = "release";
 
     /// <summary>
-    ///     Name of the remote notice manifest (<c>notice_list</c> in <c>config.xml</c>).
+    ///     Name of the remote mini-pack manifest.
     /// </summary>
-    public const string NoticeListName = "release_launcher_notice_info.xml";
+    public const string MiniPackListName = ManifestPrefix + "_" + ManifestBranch + "_mini_pack_version.json";
 
     /// <summary>
-    ///     Name of the remote device-limit manifest (<c>device_limit_list</c> in <c>config.xml</c>).
+    ///     Name of the remote launcher version manifest.
     /// </summary>
-    public const string DeviceLimitListName = "release_limit_device_info.json";
+    public const string LauncherListName = ManifestPrefix + "_" + ManifestBranch + "_launcher_version.json";
 
     /// <summary>
-    ///     Name of the remote gray-test manifest (<c>graytest_list</c> in <c>config.xml</c>).
+    ///     Name of the remote notice manifest.
     /// </summary>
-    public const string GrayTestListName = "release_gray_list_info.json";
+    public const string NoticeListName = ManifestPrefix + "_" + ManifestBranch + "_launcher_notice_info.xml";
+
+    /// <summary>
+    ///     Name of the remote gray-test manifest.
+    /// </summary>
+    public const string GrayTestListName = ManifestPrefix + "_" + ManifestBranch + "_gray_list_info.json";
+
+    /// <summary>
+    ///     Name of the remote device-limit manifest (this one carries no prefix).
+    /// </summary>
+    public const string DeviceLimitListName = ManifestBranch + "_limit_device_info.json";
+
+    /// <summary>
+    ///     Name of the remote patch manifest (plain text, it carries no <c>HEX_</c> envelope).
+    /// </summary>
+    public const string PatchMd5ListName = ManifestPrefix + "_patchmd5_windows64_normal.txt";
 
     /// <summary>
     ///     The <c>cdn_map</c> domains of the CN build, in the order the launcher tries them.

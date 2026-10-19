@@ -244,20 +244,62 @@ public partial class NeteaseGamesGameManager : GameManagerBase
     {
         Uri uri = NeteaseGamesEndpoints.GetManifestUri(
             NeteaseGamesEndpoints.PatchListBaseUrl,
-            "release_patchmd5_windows64_normal.txt");
+            NeteaseGamesEndpoints.PatchMd5ListName);
 
         byte[] raw = await ApiResponseHttpClient.GetByteArrayAsync(uri, token).ConfigureAwait(false);
         byte[] plain = NeteaseGamesCrypto.IsHexEnvelope(raw)
             ? NeteaseGamesCrypto.DecryptHexEnvelope(raw)
             : raw;
 
-        string[] lines = System.Text.Encoding.UTF8.GetString(plain)
-            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        string text = System.Text.Encoding.UTF8.GetString(plain);
+        string[] lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-        // Line layout: <engine version>, <big patch md5>, <package version>, <private script version>
-        if (lines.Length >= 3 && long.TryParse(lines[2], out long packageVersion))
+        // Line layout: <engine version>, <big patch md5>, <package version>, <private script version>.
+        // Depending on the branch the package version is on the third or on the fourth line, so the
+        // largest of the two numeric candidates is used.
+        long best = 0;
+        for (int i = 2; i < lines.Length && i < 4; i++)
         {
-            return packageVersion;
+            if (long.TryParse(lines[i], out long candidate) && candidate > best)
+            {
+                best = candidate;
+            }
+        }
+
+        if (best > 0)
+        {
+            return best;
+        }
+
+        return ParsePackageVersionFromJson(text);
+    }
+
+    /// <summary>
+    ///     Reads the package version from the JSON part of the patch manifest
+    ///     (<c>normal.latest_pkgversion</c>).
+    /// </summary>
+    private static long ParsePackageVersionFromJson(string text)
+    {
+        int start = text.IndexOf('{');
+        if (start < 0)
+        {
+            return 0;
+        }
+
+        try
+        {
+            using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(text[start..]);
+            if (document.RootElement.TryGetProperty("normal", out System.Text.Json.JsonElement normal) &&
+                normal.TryGetProperty("latest_pkgversion", out System.Text.Json.JsonElement latest) &&
+                latest.ValueKind == System.Text.Json.JsonValueKind.Number &&
+                latest.TryGetInt64(out long version))
+            {
+                return version;
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return 0;
         }
 
         return 0;

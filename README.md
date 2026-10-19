@@ -26,19 +26,27 @@ Hi3Helper.Plugin.Core/               Collapse 上游 ABI（子模块）
 | 下载（Range 续传 + MD5 校验） | ⚠️ | 代码就绪，**内容 CDN 鉴权待破**（`h74.gdl.netease.com` 边缘 403） |
 | 公告 / 轮播 / 背景图 | ✅ | 本地 `Documents\notice\*` + 远端 `release_launcher_notice_info.xml` |
 | 直启游戏（不走官方启动器） | ✅ | `NeteaseGamesGameLauncher.PrepareLaunch` 写启动标记 → `Launch` 提权拉起 `ywzh.exe` + 官方参数 |
+| 内容 CDN 的 URL 签名 | ✅ | `NeteaseGamesUrlSigner`：`key1 = md5(secret + path + key2)`、`key2 = hex(epoch + 12h)`，纯本地计算 |
+| HD server 调度服务 | ✅ | `NeteaseGamesDispatch`：`AUTH-PROJECT` / `AUTH-TOKEN` 头 + `/v2/?domain=` |
+| 下载（Range 续传 + MD5 校验） | ⚠️ | 代码就绪，**内容对象路径形状待确认**（签名已通，403→404） |
 
 ## 关键逆向结论（详见 `docs/NETEASE-RE-NeteaseGames.md`）
 
 1. **HEX_ 清单信封**：`"HEX_"`(4 字节) + `Base64( XOR( zlib(明文), "netease_joker_h74_encrypt_key" ) )`
 2. **LCFG 启动器配置**：`"LCFG"` + `0x01` + `IV(16)` + `AES-256-CBC(无 padding)`，
    key = `PCLauncher.exe` RVA `0x2204280` 起的 32 字节
-3. **远端清单命名规律**：`<patch_list_url>/<branch>_<file>`，branch = `release`
+3. **远端清单命名规律**：`<patch_list_url>/<prefix>_<branch>_<file>`，prefix = **OB**、branch = release
+   （⚠️ 漏掉 `OB_` 前缀会拿到**陈旧分支**的清单）
 4. **差分模型**：网易没有二进制差分，就是"松散文件 + mpk 分片"粒度增量
 5. **CPS 标签**：与 HEX_ 同一套信封（无 `HEX_` 前缀）——`Base64(XOR(zlib(明文), 同一把 key))`
 6. **启动器标记**：游戏启动时打开 `LocalData\Patch\ywzh.exe`，**不存在就弹"请从启动器启动游戏。"**
    ⇒ 插件自己放一份游戏 exe 副本即可绕过；随后游戏把启动交给 `ywzh_.exe`（启动器预置的新版 exe），
    判定"是否在运行"要同时看 `ywzh` 与 `ywzh_` 两个进程名
 7. **提权**：游戏 exe 的 manifest 要求管理员 ⇒ 必须经 shell 启动（`UseShellExecute` + `runas`）
+8. **内容 CDN 签名**：`key1 = md5("p99AkludZnNOkBNQd3ldWkLjGVfC" + path + key2)`、
+   `key2 = hex(unix_time + 43200)`；无签名 403，带签名 404（鉴权已过）
+9. **调度服务**：`GET https://<边缘IP>/v2/?domain=<域名>` + 头 `AUTH-PROJECT` / `AUTH-TOKEN`
+   → `{"addrs":[...],"ttl":300}`
 
 ## 构建
 
