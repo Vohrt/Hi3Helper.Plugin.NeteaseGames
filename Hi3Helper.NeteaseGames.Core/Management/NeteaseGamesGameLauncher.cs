@@ -24,6 +24,8 @@ public static class NeteaseGamesGameLauncher
     /// </summary>
     public const string DefaultGameArguments = "--start=Python --use-pso-precache=1 --python-args=innerdesktop;script_mode#RELEASE_MODE";
 
+
+
     /// <summary>
     ///     Starts the game executable of an installation.
     /// </summary>
@@ -279,14 +281,29 @@ public static class NeteaseGamesGameLauncher
             // The game refuses to start when the launcher marker is missing.
             PrepareLaunch(gamePath);
 
-            ProcessStartInfo startInfo = new(executable)
+            // The official launcher does not start the game executable itself: it copies the executable into
+            // the patch directory and starts *that* copy with the installation root as the working directory.
+            // The game checks that it is the copy that lives in "<working directory>\LocalData\Patch", and
+            // shows the dialog "请从启动器启动游戏。" otherwise.
+            string staged = Path.Combine(gamePath, NeteaseGamesPaths.LauncherMarkerRelativePath);
+            if (!File.Exists(staged))
             {
-                WorkingDirectory = Path.GetDirectoryName(executable) ?? gamePath,
+                staged = executable;
+            }
+
+            ProcessStartInfo startInfo = new(staged)
+            {
+                // The working directory is part of the contract: the game resolves the staged copy relative
+                // to it.
+                WorkingDirectory = gamePath,
                 // The game executable is manifested as "requireAdministrator", so it has to be started through
                 // the shell - a plain CreateProcess would fail with ERROR_ELEVATION_REQUIRED (740).
                 UseShellExecute = true,
                 Verb = "runas",
+                // The official command line ends with the quoted takeover argument, which tells the game that
+                // the launcher hands the session over to it.
                 Arguments = QuoteArguments(CombineArguments(DefaultGameArguments, startArgument))
+                            + " \" --takeover\""
             };
 
             Process? process;
