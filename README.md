@@ -25,7 +25,7 @@ Hi3Helper.Plugin.Core/               Collapse 上游 ABI（子模块）
 | 差分计划（文件/分片粒度增量，与官方一致） | ✅ | `NeteaseGamesGameInstaller.BuildPatchListPlan` |
 | 下载（Range 续传 + MD5 校验） | ⚠️ | 代码就绪，**内容 CDN 鉴权待破**（`h74.gdl.netease.com` 边缘 403） |
 | 公告 / 轮播 / 背景图 | ✅ | 本地 `Documents\notice\*` + 远端 `release_launcher_notice_info.xml` |
-| 直启游戏（不走官方启动器） | ✅ | `NeteaseGamesGameLauncher.Launch` → `ywzh.exe` + 官方参数 |
+| 直启游戏（不走官方启动器） | ✅ | `NeteaseGamesGameLauncher.PrepareLaunch` 写启动标记 → `Launch` 提权拉起 `ywzh.exe` + 官方参数 |
 
 ## 关键逆向结论（详见 `docs/NETEASE-RE-NeteaseGames.md`）
 
@@ -34,6 +34,11 @@ Hi3Helper.Plugin.Core/               Collapse 上游 ABI（子模块）
    key = `PCLauncher.exe` RVA `0x2204280` 起的 32 字节
 3. **远端清单命名规律**：`<patch_list_url>/<branch>_<file>`，branch = `release`
 4. **差分模型**：网易没有二进制差分，就是"松散文件 + mpk 分片"粒度增量
+5. **CPS 标签**：与 HEX_ 同一套信封（无 `HEX_` 前缀）——`Base64(XOR(zlib(明文), 同一把 key))`
+6. **启动器标记**：游戏启动时打开 `LocalData\Patch\ywzh.exe`，**不存在就弹"请从启动器启动游戏。"**
+   ⇒ 插件自己放一份游戏 exe 副本即可绕过；随后游戏把启动交给 `ywzh_.exe`（启动器预置的新版 exe），
+   判定"是否在运行"要同时看 `ywzh` 与 `ywzh_` 两个进程名
+7. **提权**：游戏 exe 的 manifest 要求管理员 ⇒ 必须经 shell 启动（`UseShellExecute` + `runas`）
 
 ## 构建
 
