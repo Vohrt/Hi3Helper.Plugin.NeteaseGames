@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Hi3Helper.NeteaseGames.Core/Hi3Helper.NeteaseGames.Core.csproj" />
+  <Project Path="Hi3Helper.Plugin.NeteaseGames/Hi3Helper.Plugin.NeteaseGames.csproj" />
+</Solution>

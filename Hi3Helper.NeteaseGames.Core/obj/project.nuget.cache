@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "vhm/97r2nK0=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\Voheart\\source\\repos\\Collapse\\Hi3Helper.Plugin.NeteaseGames\\Hi3Helper.NeteaseGames.Core\\Hi3Helper.NeteaseGames.Core.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\Voheart\\.nuget\\packages\\microsoft.extensions.dependencyinjection.abstractions\\10.0.12\\microsoft.extensions.dependencyinjection.abstractions.10.0.12.nupkg.sha512",
+    "C:\\Users\\Voheart\\.nuget\\packages\\microsoft.extensions.logging.abstractions\\10.0.12\\microsoft.extensions.logging.abstractions.10.0.12.nupkg.sha512"
+  ],
+  "logs": []
+}

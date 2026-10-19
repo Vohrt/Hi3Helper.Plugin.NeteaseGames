@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>disable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <Platforms>x64</Platforms>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <DebugType>embedded</DebugType>
+        <Deterministic>true</Deterministic>
+        <LangVersion>preview</LangVersion>
+        <AssemblyName>NeteaseGames.Core</AssemblyName>
+        <ProductName>NetEase Games Core Plugin Library</ProductName>
+        <Product>Collapse</Product>
+        <Description>Common core functionality (NetEase HEX_ manifest envelope, LCFG launcher config, mini-pack update protocol) for NetEase-published game plugins in Collapse Launcher</Description>
+        <AssemblyTitle>NetEase Games Core Library</AssemblyTitle>
+        <Company>CollapsePlugin</Company>
+        <Authors>$(Company).</Authors>
+        <Copyright>Copyright 2026 $(Company)</Copyright>
+        <Version>0.1.0</Version>
+        <Configurations>Debug;Release;DebugNoReflection;ReleaseNoReflection</Configurations>
+        <Title>Hi3Helper.NeteaseGames.Core</Title>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)'=='DebugNoReflection'">
+        <DefineConstants>$(DefineConstants);DEBUG;USELIGHTWEIGHTJSONPARSER</DefineConstants>
+        <Optimize>false</Optimize>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)'=='ReleaseNoReflection'">
+        <DefineConstants>$(DefineConstants);USELIGHTWEIGHTJSONPARSER</DefineConstants>
+        <Optimize>true</Optimize>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Hi3Helper.Plugin.Core\Hi3Helper.Plugin.Core.csproj"/>
+    </ItemGroup>
+
+</Project>

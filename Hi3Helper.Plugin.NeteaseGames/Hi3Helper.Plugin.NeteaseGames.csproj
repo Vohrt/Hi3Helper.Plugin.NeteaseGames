@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>disable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <Platforms>x64</Platforms>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <DebugType>embedded</DebugType>
+        <Deterministic>true</Deterministic>
+        <LangVersion>preview</LangVersion>
+        <AssemblyName>NeteaseGames</AssemblyName>
+        <ProductName>NetEase Games Plugin</ProductName>
+        <Product>Collapse</Product>
+        <Description>This library is a plugin for adding support for NetEase published games (e.g. Sea of Remnants / 遗忘之海) into Collapse Launcher</Description>
+        <AssemblyTitle>NetEase Games Plugin</AssemblyTitle>
+        <Company>CollapsePlugin</Company>
+        <Authors>$(Company).</Authors>
+        <Copyright>Copyright 2026 $(Company)</Copyright>
+        <Version>0.1.0</Version>
+        <Configurations>Debug;Release;DebugNoReflection;ReleaseNoReflection</Configurations>
+        <Title>Hi3Helper.Plugin.NeteaseGames</Title>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)'=='DebugNoReflection'">
+        <DefineConstants>$(DefineConstants);DEBUG;USELIGHTWEIGHTJSONPARSER</DefineConstants>
+        <Optimize>false</Optimize>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)'=='ReleaseNoReflection'">
+        <DefineConstants>$(DefineConstants);USELIGHTWEIGHTJSONPARSER</DefineConstants>
+        <Optimize>true</Optimize>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Hi3Helper.Plugin.Core\Hi3Helper.Plugin.Core.csproj"/>
+        <ProjectReference Include="..\Hi3Helper.NeteaseGames.Core\Hi3Helper.NeteaseGames.Core.csproj"/>
+    </ItemGroup>
+
+</Project>
