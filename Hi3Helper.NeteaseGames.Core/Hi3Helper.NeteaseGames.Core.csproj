@@ -21,6 +21,9 @@
         <Version>0.1.0</Version>
         <Configurations>Debug;Release;DebugNoReflection;ReleaseNoReflection</Configurations>
         <Title>Hi3Helper.NeteaseGames.Core</Title>
+        <!-- The plugin targets Windows only (Collapse is a Windows launcher), so the registry based
+             installation discovery is always safe. -->
+        <NoWarn>$(NoWarn);CA1416</NoWarn>
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)'=='DebugNoReflection'">

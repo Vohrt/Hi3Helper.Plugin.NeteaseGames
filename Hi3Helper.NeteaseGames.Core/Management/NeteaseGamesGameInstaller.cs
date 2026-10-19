@@ -284,7 +284,8 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
 
         foreach ((string name, NeteaseGamesPackageEntry remotePackage) in remote.Packages)
         {
-            if (local.Packages.TryGetValue(name, out NeteaseGamesPackageEntry localPackage) &&
+            if (local.Packages.TryGetValue(name, out NeteaseGamesPackageEntry? localPackage) &&
+                localPackage is not null &&
                 HashesEqual(localPackage.Hashes, remotePackage.Hashes))
             {
                 continue;

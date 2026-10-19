@@ -17,7 +17,7 @@ using System.Reflection;
     "mini-pack update protocol) for NetEase-published game plugins in Collapse Launch" +
     "er"))]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("0.1.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.1.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.1.0+673d0c9830ee7cb4a9ad7fe1f38963368eb4e65a")]
 [assembly: System.Reflection.AssemblyProductAttribute("Collapse")]
 [assembly: System.Reflection.AssemblyTitleAttribute("NetEase Games Core Library")]
 [assembly: System.Reflection.AssemblyVersionAttribute("0.1.0.0")]

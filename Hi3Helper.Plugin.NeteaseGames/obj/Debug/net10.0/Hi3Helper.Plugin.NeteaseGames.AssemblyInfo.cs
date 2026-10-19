@@ -16,7 +16,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyDescriptionAttribute(("This library is a plugin for adding support for NetEase published games (e.g. Sea" +
     " of Remnants / 遗忘之海) into Collapse Launcher"))]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("0.1.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.1.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.1.0+673d0c9830ee7cb4a9ad7fe1f38963368eb4e65a")]
 [assembly: System.Reflection.AssemblyProductAttribute("Collapse")]
 [assembly: System.Reflection.AssemblyTitleAttribute("NetEase Games Plugin")]
 [assembly: System.Reflection.AssemblyVersionAttribute("0.1.0.0")]
