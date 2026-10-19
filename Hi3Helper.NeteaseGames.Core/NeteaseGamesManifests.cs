@@ -296,6 +296,14 @@ public sealed class NeteaseGamesPatchList
                     entry.Hashes.Add(reader.GetUInt64());
                 }
             }
+
+            // The last number of the list is the size of the package, the others are the hashes of the
+            // files that are stored inside it.
+            if (entry.Hashes.Count > 0)
+            {
+                entry.TotalSize = (long)entry.Hashes[^1];
+                entry.Hashes.RemoveAt(entry.Hashes.Count - 1);
+            }
         }
     }
 

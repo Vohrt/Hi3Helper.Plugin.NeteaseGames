@@ -250,9 +250,10 @@ public sealed class NeteaseGamesDelta
         long packageSize = 0;
         foreach ((string name, NeteaseGamesPackageEntry entry) in remote.Packages)
         {
+            // The hash list of a package contains the hashes of the files that are stored inside it,
+            // so the whole list has to be compared - not only its first element.
             if (!local.Packages.TryGetValue(name, out NeteaseGamesPackageEntry? localEntry) ||
-                localEntry.Hashes.Count == 0 || entry.Hashes.Count == 0 ||
-                localEntry.Hashes[0] != entry.Hashes[0])
+                !PackageEquals(localEntry, entry))
             {
                 packages.Add(name);
                 packageSize += entry.TotalSize;
@@ -268,6 +269,26 @@ public sealed class NeteaseGamesDelta
             RequiredPackages = packages,
             PackageDownloadSize = packageSize
         };
+    }
+    /// <summary>
+    ///     Compares the hash lists of two packages.
+    /// </summary>
+    private static bool PackageEquals(NeteaseGamesPackageEntry left, NeteaseGamesPackageEntry right)
+    {
+        if (left.Hashes.Count != right.Hashes.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < left.Hashes.Count; i++)
+        {
+            if (left.Hashes[i] != right.Hashes[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }
 
