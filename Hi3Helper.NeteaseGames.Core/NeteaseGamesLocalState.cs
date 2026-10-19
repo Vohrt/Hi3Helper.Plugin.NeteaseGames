@@ -32,6 +32,36 @@ public static class NeteaseGamesPaths
     public const string PatchDirectoryRelativePath = @"LocalData\Patch";
 
     /// <summary>
+    ///     Relative path of the file the game uses to detect that it was started by the official launcher.
+    ///     <para>
+    ///         The game opens <c>LocalData\Patch\ywzh.exe</c> while it boots. When the file is missing it shows
+    ///         the dialog "请从启动器启动游戏。" (please start the game from the launcher) and refuses to continue.
+    ///         The launcher stages a copy of the game executable there, so writing that copy is enough to make
+    ///         the game accept a direct start. The content of the file is irrelevant - only its presence is
+    ///         checked.
+    ///     </para>
+    /// </summary>
+    public const string LauncherMarkerRelativePath = @"LocalData\Patch\ywzh.exe";
+
+    /// <summary>
+    ///     Relative path of the channel tag file the launcher writes into the patch directory.
+    ///     <para>
+    ///         The file holds the encrypted channel tag (Base64 + XOR + zlib, see
+    ///         <see cref="NeteaseGamesCrypto.DecryptCpsTag" />).
+    ///     </para>
+    /// </summary>
+    public const string CpsTagRelativePath = @"LocalData\Patch\CPS_TAG";
+
+    /// <summary>
+    ///     The name of the staged game executable the launcher downloads next to the running one.
+    ///     <para>
+    ///         The game executable hands the start over to <c>ywzh_.exe</c> (the freshly downloaded build) and
+    ///         exits; the staged build is the one that keeps running.
+    ///     </para>
+    /// </summary>
+    public const string StagedGameExecutableName = "ywzh_.exe";
+
+    /// <summary>
     ///     Relative path of the user documents (version data, notices, hotfix cache).
     /// </summary>
     public const string DocumentsRelativePath = "Documents";

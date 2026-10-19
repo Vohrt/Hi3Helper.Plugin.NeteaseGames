@@ -11,6 +11,7 @@ namespace Hi3Helper.NeteaseGames.Core;
 ///     Decrypts the two obfuscation layers NetEase uses on its launcher assets.
 ///     <list type="bullet">
 ///         <item><b>HEX_ manifest envelope</b>: "HEX_" + Base64( XOR( zlib(plaintext), KEY ) ), key = netease_joker_h74_encrypt_key.</item>
+///         <item><b>CPS tag</b>: the same body without the magic - Base64( XOR( zlib(plaintext), KEY ) ).</item>
 ///         <item><b>LCFG launcher config</b>: "LCFG" | 0x01 | IV(16) | AES-256-CBC(no padding), key = constant in PCLauncher.exe.</item>
 ///     </list>
 /// </summary>
@@ -42,8 +43,38 @@ public static class NeteaseGamesCrypto
             throw new InvalidDataException("Not a HEX_ manifest envelope.");
         }
 
-        StringBuilder builder = new(file.Length - HexEnvelopeMagic.Length);
-        foreach (char character in Encoding.ASCII.GetString(file[HexEnvelopeMagic.Length..]))
+        return Inflate(XorKey(DecodeBase64Body(file[HexEnvelopeMagic.Length..])));
+    }
+
+    /// <summary>
+    ///     Decrypts a CPS tag (the channel tag the launcher stores next to the patch data).
+    ///     <para>
+    ///         It uses the very same envelope as the HEX_ manifests - Base64 + cyclic XOR + zlib - but without
+    ///         the <c>HEX_</c> magic. The key is <see cref="HexEnvelopeKey" /> again, which was confirmed by
+    ///         disassembling <c>DecryptCpsTag</c> of the official launcher (RVA 0xEF040).
+    ///     </para>
+    /// </summary>
+    public static byte[] DecryptCpsTag(ReadOnlySpan<byte> file) => Inflate(XorKey(DecodeBase64Body(file)));
+
+    /// <summary>Encrypts a channel tag into the CPS tag representation.</summary>
+    /// <param name="tag">The channel tag, e.g. <c>_launcher_deploy_202609161132</c>.</param>
+    public static byte[] EncryptCpsTag(string tag)
+    {
+        byte[] plain = Encoding.UTF8.GetBytes(tag);
+        using MemoryStream output = new();
+        using (ZLibStream zlib = new(output, CompressionLevel.Optimal, leaveOpen: true))
+        {
+            zlib.Write(plain, 0, plain.Length);
+        }
+
+        return Encoding.ASCII.GetBytes(Convert.ToBase64String(XorKey(output.ToArray())));
+    }
+
+    /// <summary>Decodes a base64 body, tolerating the line breaks and the missing padding of the manifests.</summary>
+    private static byte[] DecodeBase64Body(ReadOnlySpan<byte> body)
+    {
+        StringBuilder builder = new(body.Length);
+        foreach (char character in Encoding.ASCII.GetString(body))
         {
             if (!char.IsWhiteSpace(character))
             {
@@ -57,14 +88,24 @@ public static class NeteaseGamesCrypto
             builder.Append('=', 4 - remainder);
         }
 
-        byte[] compressed = Convert.FromBase64String(builder.ToString());
+        return Convert.FromBase64String(builder.ToString());
+    }
 
+    /// <summary>Applies the cyclic XOR of the envelope key.</summary>
+    private static byte[] XorKey(byte[] data)
+    {
         ReadOnlySpan<byte> key = Encoding.ASCII.GetBytes(HexEnvelopeKey);
-        for (int i = 0; i < compressed.Length; i++)
+        for (int i = 0; i < data.Length; i++)
         {
-            compressed[i] ^= key[i % key.Length];
+            data[i] ^= key[i % key.Length];
         }
 
+        return data;
+    }
+
+    /// <summary>Inflates the zlib stream of the envelope.</summary>
+    private static byte[] Inflate(byte[] compressed)
+    {
         using MemoryStream input = new(compressed, writable: false);
         using ZLibStream zlib = new(input, CompressionMode.Decompress);
         using MemoryStream output = new();

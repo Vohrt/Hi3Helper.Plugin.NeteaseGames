@@ -46,7 +46,7 @@ public partial class SeaOfRemnantsCnPresetConfig : PluginPresetConfigBase
 
     public override string? GameName => "遗忘之海";
 
-    public override string GameExecutableName => "ywzh.exe";
+    public override string GameExecutableName => NeteaseGamesPaths.GameExecutableRelativePath;
 
     public override string GameAppDataPath
     {
