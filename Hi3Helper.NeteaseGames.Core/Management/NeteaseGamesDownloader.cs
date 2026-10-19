@@ -102,6 +102,32 @@ public sealed class NeteaseGamesDownloader
         if (File.Exists(item.TargetPath))
         {
             alreadyDownloaded = new FileInfo(item.TargetPath).Length;
+
+            // A file that is already complete must not be requested again: the resume would ask for a range
+            // that starts behind the end of the file, and the edge answers with "416 Range Not Satisfiable".
+            if (item.ExpectedSize > 0 && alreadyDownloaded == item.ExpectedSize)
+            {
+                if (string.IsNullOrEmpty(item.ExpectedMd5) ||
+                    string.Equals(await ComputeMd5Async(item.TargetPath, token).ConfigureAwait(false),
+                        item.ExpectedMd5, StringComparison.OrdinalIgnoreCase))
+                {
+                    SharedStatic.InstanceLogger?.LogInformation(
+                        "[NeteaseGames] '{Path}' is already complete ({Size} bytes)", item.TargetPath, alreadyDownloaded);
+                    progress?.Invoke(alreadyDownloaded);
+                    return true;
+                }
+
+                try
+                {
+                    File.Delete(item.TargetPath);
+                }
+                catch (Exception)
+                {
+                    // The file is replaced by the download anyway.
+                }
+
+                alreadyDownloaded = 0;
+            }
         }
 
         Exception? lastError = null;
