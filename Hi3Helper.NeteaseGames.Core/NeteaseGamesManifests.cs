@@ -18,6 +18,12 @@ public sealed class NeteaseGamesPackageEntry
     public List<ulong> Hashes { get; } = [];
 
     public long TotalSize { get; set; }
+
+    /// <summary>
+    ///     The section the package belongs to (e.g. <c>mpk_script</c>). The content host stores the
+    ///     packages in a directory with that name.
+    /// </summary>
+    public string Section { get; set; } = string.Empty;
 }
 
 /// <summary>
@@ -184,7 +190,7 @@ public sealed class NeteaseGamesPatchList
                 case "mpk_script":
                 case "mpk_medium":
                 case "mpk_indep":
-                    ReadPackages(ref reader, list);
+                    ReadPackages(ref reader, list, property);
                     break;
                 case "mapping_version":
                     list.MappingVersion = reader.GetString() ?? string.Empty;
@@ -252,7 +258,7 @@ public sealed class NeteaseGamesPatchList
         }
     }
 
-    private static void ReadPackages(ref Utf8JsonReader reader, NeteaseGamesPatchList list)
+    private static void ReadPackages(ref Utf8JsonReader reader, NeteaseGamesPatchList list, string section)
     {
         if (reader.TokenType != JsonTokenType.StartObject)
         {
@@ -270,8 +276,12 @@ public sealed class NeteaseGamesPatchList
             string name = reader.GetString() ?? string.Empty;
             if (!list.Packages.TryGetValue(name, out NeteaseGamesPackageEntry? entry))
             {
-                entry = new NeteaseGamesPackageEntry();
+                entry = new NeteaseGamesPackageEntry { Section = section };
                 list.Packages[name] = entry;
+            }
+            else if (entry.Section.Length == 0)
+            {
+                entry.Section = section;
             }
             if (!reader.Read() || reader.TokenType != JsonTokenType.StartArray)
             {

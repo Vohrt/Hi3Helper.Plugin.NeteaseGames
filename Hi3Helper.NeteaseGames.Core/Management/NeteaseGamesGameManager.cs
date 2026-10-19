@@ -26,6 +26,8 @@ public partial class NeteaseGamesGameManager : GameManagerBase
 {
     private readonly object _syncRoot = new();
     private NeteaseGamesMiniPackManifest? _remoteManifest;
+    private NeteaseGamesPatchManifest? _remotePatchManifest;
+    private NeteaseGamesDelta? _delta;
     private long _remotePackageVersion;
     private bool _remoteProbed;
 
@@ -80,6 +82,34 @@ public partial class NeteaseGamesGameManager : GameManagerBase
         }
     }
 
+    /// <summary>
+    ///     The remote patch manifest, when it could be fetched.
+    /// </summary>
+    public NeteaseGamesPatchManifest? RemotePatchManifest
+    {
+        get
+        {
+            lock (_syncRoot)
+            {
+                return _remotePatchManifest;
+            }
+        }
+    }
+
+    /// <summary>
+    ///     The difference between the local and the remote file list, when it could be computed.
+    /// </summary>
+    public NeteaseGamesDelta? Delta
+    {
+        get
+        {
+            lock (_syncRoot)
+            {
+                return _delta;
+            }
+        }
+    }
+
     /// <inheritdoc/>
     protected override bool IsInstalled
     {
@@ -117,6 +147,7 @@ public partial class NeteaseGamesGameManager : GameManagerBase
     protected override async Task<int> InitAsync(CancellationToken token)
     {
         await ProbeRemoteVersionAsync(token).ConfigureAwait(false);
+        await ProbeDeltaAsync(token).ConfigureAwait(false);
         return 0;
     }
 
@@ -252,6 +283,18 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             : raw;
 
         string text = System.Text.Encoding.UTF8.GetString(plain);
+        NeteaseGamesPatchManifest manifest = NeteaseGamesPatchManifest.Parse(text);
+
+        lock (_syncRoot)
+        {
+            _remotePatchManifest = manifest;
+        }
+
+        if (manifest.LatestPackageVersion > 0)
+        {
+            return manifest.LatestPackageVersion;
+        }
+
         string[] lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         // Line layout: <engine version>, <big patch md5>, <package version>, <private script version>.
@@ -266,12 +309,75 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             }
         }
 
-        if (best > 0)
+        return best;
+    }
+
+    /// <summary>
+    ///     Downloads the remote file list from the content host and compares it with the local one.
+    /// </summary>
+    /// <param name="token">Cancel token.</param>
+    public async Task ProbeDeltaAsync(CancellationToken token)
+    {
+        NeteaseGamesPatchManifest? manifest = RemotePatchManifest;
+        if (manifest is null || string.IsNullOrEmpty(manifest.BaseVersion))
         {
-            return best;
+            return;
         }
 
-        return ParsePackageVersionFromJson(text);
+        string? installPath = CurrentGameInstallPath;
+        NeteaseGamesPatchList? local = string.IsNullOrEmpty(installPath)
+            ? null
+            : NeteaseGamesLocalState.ReadPatchList(installPath);
+        if (local is null)
+        {
+            return;
+        }
+
+        try
+        {
+            NeteaseGamesPatchList remote = await FetchRemotePatchListAsync(manifest.BaseVersion, token)
+                .ConfigureAwait(false);
+
+            NeteaseGamesDelta delta = NeteaseGamesDelta.Compute(local, remote);
+            lock (_syncRoot)
+            {
+                _delta = delta;
+            }
+
+            SharedStatic.InstanceLogger?.LogInformation(
+                "[NeteaseGames] Delta: +{Added} ~{Changed} -{Removed} loose={Loose} MB packages={Packages} ({PackageMB} MB)",
+                delta.AddedFiles, delta.ChangedFiles, delta.RemovedFiles,
+                delta.LooseDownloadSize / 1024 / 1024, delta.RequiredPackages.Count,
+                delta.PackageDownloadSize / 1024 / 1024);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            SharedStatic.InstanceLogger?.LogWarning("[NeteaseGames] Failed to compute the delta: {Msg}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    ///     Downloads the remote file list (the variant that contains the files of the mpk shards).
+    /// </summary>
+    /// <param name="version">The base version of the patch.</param>
+    /// <param name="token">Cancel token.</param>
+    public async Task<NeteaseGamesPatchList> FetchRemotePatchListAsync(string version, CancellationToken token)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(version);
+
+        string url = NeteaseGamesContentEndpoints.GetContentUrl(
+            version, null, NeteaseGamesContentEndpoints.PatchListMpkFileName, DateTimeOffset.UtcNow);
+
+        byte[] raw = await ApiResponseHttpClient.GetByteArrayAsync(new Uri(url), token).ConfigureAwait(false);
+        byte[] plain = NeteaseGamesCrypto.IsHexEnvelope(raw)
+            ? NeteaseGamesCrypto.DecryptHexEnvelope(raw)
+            : raw;
+
+        return NeteaseGamesPatchList.Parse(plain);
     }
 
     /// <summary>
