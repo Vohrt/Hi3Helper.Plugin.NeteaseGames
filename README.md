@@ -27,8 +27,10 @@ Hi3Helper.Plugin.Core/               Collapse 上游 ABI（子模块）
 | 公告 / 轮播 / 背景图 | ✅ | 本地 `Documents\notice\*` + 远端 `release_launcher_notice_info.xml` |
 | 直启游戏（不走官方启动器） | ✅ | `NeteaseGamesGameLauncher.PrepareLaunch` 写启动标记 → `Launch` 提权拉起 `ywzh.exe` + 官方参数 |
 | 内容 CDN 的 URL 签名 | ✅ | `NeteaseGamesUrlSigner`：`key1 = md5(secret + path + key2)`、`key2 = hex(epoch + 12h)`，纯本地计算 |
+| 内容主机与路径形状 | ✅ | `h74.gph.netease.com`（镜像 h74-21 / h74-19）：`/<版本>/<文件>`、`/<版本>/<段>/<文件>` |
 | HD server 调度服务 | ✅ | `NeteaseGamesDispatch`：`AUTH-PROJECT` / `AUTH-TOKEN` 头 + `/v2/?domain=` |
-| 下载（Range 续传 + MD5 校验） | ⚠️ | 代码就绪，**内容对象路径形状待确认**（签名已通，403→404） |
+| 文件清单差分 | ✅ | `NeteaseGamesDelta`：分片首哈希即分片哈希 ⇒ 比对即知哪些分片/文件要重下 |
+| 下载（Range 续传 + MD5 校验） | ⚠️ | 代码就绪，**松散文件（`mpkexclude`）的单文件 URL 形状待确认** |
 
 ## 关键逆向结论（详见 `docs/NETEASE-RE-NeteaseGames.md`）
 
