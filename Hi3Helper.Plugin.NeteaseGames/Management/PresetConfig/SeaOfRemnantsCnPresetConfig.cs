@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.InteropServices.Marshalling;
 using System.Threading;
 using System.Threading.Tasks;
 using Hi3Helper.NeteaseGames.Core;
@@ -22,6 +23,7 @@ namespace Hi3Helper.Plugin.NeteaseGames.Management.PresetConfig;
 ///         game is started without the official PCLauncher.
 ///     </para>
 /// </summary>
+[GeneratedComClass]
 public partial class SeaOfRemnantsCnPresetConfig : PluginPresetConfigBase
 {
     private readonly NeteaseGamesGameManager _gameManager = new();

@@ -1,5 +1,6 @@
 using System;
 using System.Net.Http;
+using System.Runtime.InteropServices.Marshalling;
 using Hi3Helper.Plugin.Core.Update;
 using Hi3Helper.Plugin.Core.Utility;
 
@@ -8,6 +9,7 @@ namespace Hi3Helper.Plugin.NeteaseGames;
 /// <summary>
 ///     Self update of the plugin itself.
 /// </summary>
+[GeneratedComClass]
 public partial class SelfUpdate : PluginSelfUpdateBase
 {
     private static readonly string[] _baseCdnUrls =
