@@ -26,6 +26,30 @@ public static class NeteaseGamesGameLauncher
     /// </summary>
     public const string DefaultGameArguments = "--start=Python --use-pso-precache=1 --python-args=innerdesktop;script_mode#RELEASE_MODE";
 
+    /// <summary>
+    ///     Builds the file system arguments the game expects.
+    ///     <para>
+    ///         The game mounts the directories of the installation with these arguments; they are part of the
+    ///         contract of the official start (the game stores them next to its own strings).
+    ///     </para>
+    /// </summary>
+    /// <param name="gameDirectory">The root of the game installation.</param>
+    public static string BuildFileSystemArguments(string gameDirectory)
+    {
+        string local = gameDirectory.TrimEnd('\\');
+
+        return string.Join(' ',
+            $"--fs-precmds=mkdir:\"{local}\\LocalData\"",
+            $"--fs-precmds=mkdir:\"{local}\\LocalData\\Patch\"",
+            $"--fs-root=\"{local}\"",
+            $"--fs-root=\"{local}\"",
+            "--fs-native=:/",
+            "--fs-native=Engine:/Engine/",
+            "--fs-native=Patch:/LocalData/Patch/",
+            "--fs-native=Resources:/Package/",
+            "--fs-native=LocalData:/LocalData/",
+            "!GClientEngine");
+    }
 
 
     /// <summary>
@@ -331,7 +355,8 @@ public static class NeteaseGamesGameLauncher
                 Verb = "runas",
                 // The official command line ends with the quoted takeover argument, which tells the game that
                 // the launcher hands the session over to it.
-                Arguments = QuoteArguments(CombineArguments(DefaultGameArguments, startArgument))
+                Arguments = QuoteArguments(CombineArguments(
+                    CombineArguments(DefaultGameArguments, BuildFileSystemArguments(gamePath)), startArgument))
                             + " \" --takeover\""
             };
 
