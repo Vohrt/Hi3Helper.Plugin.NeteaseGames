@@ -234,25 +234,40 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git fetch origin release 2>/dev/null || true
-          if git rev-parse --verify --quiet origin/release >/dev/null; then
+          echo "=== downloaded artifacts ==="
+          find artifacts -type f | sort
+
+          # Start from the current release branch so the other games' directories survive.
+          if git fetch origin release 2>/dev/null && git rev-parse --verify --quiet origin/release >/dev/null; then
+            echo "=== updating the existing release branch"
             git checkout -B release origin/release
           else
+            echo "=== creating the release branch"
             git checkout --orphan release
             git rm -rf . >/dev/null 2>&1 || true
           fi
 
           for dir in artifacts/plugin-*; do
             short="${dir#artifacts/plugin-}"
+            echo "=== staging $short from $dir"
             mkdir -p "$short"
             cp "$dir/manifest.json" "$short/manifest.json"
             cp "$dir/$short.dll" "$short/$short.dll"
-            echo "staged $short"
           done
 
-          # Only the per-game directories belong on this branch: the downloaded artifacts are build inputs.
-          rm -rf artifacts
+          # The downloaded artifacts are build inputs, not branch content: only the per-game directories are
+          # staged (an unconditional `git add -A` would also pick up whatever the checkout left behind).
+          for dir in artifacts/plugin-*; do
+            short="${dir#artifacts/plugin-}"
+            git add --force -- "$short"
+          done
 
-          git add -A
-          git commit -m "Publish auto-update files for ${{ github.ref_name }}" 2>/dev/null || echo "nothing to commit"
+          echo "=== staged"
+          git diff --cached --name-status
+
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+          else
+            git commit -m "Publish auto-update files"
+          fi
           git push origin HEAD:release --force
