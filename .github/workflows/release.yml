@@ -262,6 +262,17 @@ jobs:
             git -C "$work" add --force -- "$short"
           done
 
+          # Whatever else the branch carried before (for example the downloaded artifacts of an older run) is
+          # not branch content: the branch holds the per-game directories only.
+          for entry in "$work"/*; do
+            name="$(basename "$entry")"
+            if [ "$name" != ".git" ] && [ ! -d "$work/$name" -o ! -f "$work/$name/manifest.json" ]; then
+              echo "=== dropping $name"
+              rm -rf "$work/$name"
+              git -C "$work" rm -r --cached --quiet --ignore-unmatch -- "$name" || true
+            fi
+          done
+
           echo "=== files on the branch"
           git -C "$work" status --short
 
