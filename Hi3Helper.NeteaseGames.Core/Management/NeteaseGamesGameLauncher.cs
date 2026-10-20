@@ -15,42 +15,24 @@ namespace Hi3Helper.NeteaseGames.Core.Management;
 ///     Starts the game directly, without the official PCLauncher.
 ///     <para>
 ///         The NetEase client ships the complete account stack (UniSDK) itself, so the launcher is only a
-///         download manager - the game can be started on its own. The only thing the game insists on is the
-///         launcher marker in the patch directory, which <see cref="PrepareLaunch" /> writes.
+///         download manager - the game can be started on its own. The start contract was taken from a running
+///         official launcher: it starts the game executable of the installation with the installation root as
+///         the working directory and with four arguments, without staging a copy of the executable and without
+///         the file system arguments of the launcher.
 ///     </para>
 /// </summary>
 public static class NeteaseGamesGameLauncher
 {
     /// <summary>
-    ///     The command line the official launcher uses to start the game (<c>game_args</c> in <c>config.xml</c>).
-    /// </summary>
-    public const string DefaultGameArguments = "--start=Python --use-pso-precache=1 --python-args=innerdesktop;script_mode#RELEASE_MODE";
-
-    /// <summary>
-    ///     Builds the file system arguments the game expects.
+    ///     The command line the official launcher uses to start the game.
     ///     <para>
-    ///         The game mounts the directories of the installation with these arguments; they are part of the
-    ///         contract of the official start (the game stores them next to its own strings).
+    ///         It was read from a running official launcher:
+    ///         <c>"...\Engine\Binaries\Win64Release\ywzh.exe" --start=Python --use-pso-precache=1
+    ///         --python-args=innerdesktop;script_mode#RELEASE_MODE --dx12</c>.
     ///     </para>
     /// </summary>
-    /// <param name="gameDirectory">The root of the game installation.</param>
-    public static string BuildFileSystemArguments(string gameDirectory)
-    {
-        string local = gameDirectory.TrimEnd('\\');
-
-        return string.Join(' ',
-            $"--fs-precmds=mkdir:\"{local}\\LocalData\"",
-            $"--fs-precmds=mkdir:\"{local}\\LocalData\\Patch\"",
-            $"--fs-root=\"{local}\"",
-            $"--fs-root=\"{local}\"",
-            "--fs-native=:/",
-            "--fs-native=Engine:/Engine/",
-            "--fs-native=Patch:/LocalData/Patch/",
-            "--fs-native=Resources:/Package/",
-            "--fs-native=LocalData:/LocalData/",
-            "!GClientEngine");
-    }
-
+    public const string DefaultGameArguments =
+        "--start=Python --use-pso-precache=1 --python-args=innerdesktop;script_mode#RELEASE_MODE --dx12";
 
     /// <summary>
     ///     Starts the game executable of an installation.
@@ -72,7 +54,8 @@ public static class NeteaseGamesGameLauncher
 
         ProcessStartInfo startInfo = new(executable)
         {
-            WorkingDirectory = Path.GetDirectoryName(executable) ?? gameDirectory,
+            // The official launcher uses the installation root as the working directory.
+            WorkingDirectory = gameDirectory,
             // The game executable is manifested as "requireAdministrator", so it has to be started through the
             // shell - a plain CreateProcess would fail with ERROR_ELEVATION_REQUIRED (740).
             UseShellExecute = true,
@@ -88,10 +71,9 @@ public static class NeteaseGamesGameLauncher
     /// <summary>
     ///     Prepares an installation for a direct start.
     ///     <para>
-    ///         The game opens <c>LocalData\Patch\ywzh.exe</c> while it boots and shows the dialog
-    ///         "请从启动器启动游戏。" when that file does not exist. The official launcher stages a copy of the
-    ///         game executable there, so the plugin does the same - only the presence of the file is checked,
-    ///         its content does not matter.
+    ///         The official launcher does not stage a copy of the game executable; it starts the executable of
+    ///         the installation itself. The only thing it writes is the channel tag of the installation, so the
+    ///         plugin does that as well when it is missing.
     ///     </para>
     /// </summary>
     /// <param name="gameDirectory">The root of the game installation.</param>
@@ -102,25 +84,6 @@ public static class NeteaseGamesGameLauncher
         if (!File.Exists(executable))
         {
             throw new FileNotFoundException("The game executable could not be found.", executable);
-        }
-
-        string marker = Path.Combine(gameDirectory, NeteaseGamesPaths.LauncherMarkerRelativePath);
-        try
-        {
-            string? markerDirectory = Path.GetDirectoryName(marker);
-            if (!string.IsNullOrEmpty(markerDirectory))
-            {
-                Directory.CreateDirectory(markerDirectory);
-            }
-
-            if (!IsUpToDateMarker(marker, executable))
-            {
-                File.Copy(executable, marker, overwrite: true);
-            }
-        }
-        catch (Exception)
-        {
-            // A read-only or busy installation must not stop the start; the game will complain on its own.
         }
 
         if (string.IsNullOrEmpty(channelTag))
@@ -138,30 +101,7 @@ public static class NeteaseGamesGameLauncher
         }
         catch (Exception)
         {
-            // The channel tag is optional - the game only needs the launcher marker.
-        }
-    }
-
-    /// <summary>
-    ///     Checks whether the staged launcher marker is the same build as the running game executable.
-    /// </summary>
-    private static bool IsUpToDateMarker(string marker, string executable)
-    {
-        try
-        {
-            if (!File.Exists(marker))
-            {
-                return false;
-            }
-
-            FileInfo markerInfo = new(marker);
-            FileInfo executableInfo = new(executable);
-            return markerInfo.Length == executableInfo.Length &&
-                   markerInfo.LastWriteTimeUtc == executableInfo.LastWriteTimeUtc;
-        }
-        catch (Exception)
-        {
-            return false;
+            // The channel tag is optional - the game works without it.
         }
     }
 
@@ -258,8 +198,8 @@ public static class NeteaseGamesGameLauncher
     /// <summary>
     ///     The names of the processes that belong to the game.
     ///     <para>
-    ///         The game executable hands the start over to the staged build (<c>ywzh_.exe</c>), so both names
-    ///         have to be taken into account when the lifetime of the game is followed.
+    ///         The game starts itself a second time under the name <c>ywzh_.exe</c>, so both names have to be
+    ///         taken into account when the lifetime of the game is followed.
     ///     </para>
     /// </summary>
     private static IEnumerable<string> GetProcessNames(string gameDirectory)
@@ -280,9 +220,8 @@ public static class NeteaseGamesGameLauncher
     /// <summary>
     ///     Starts the game on behalf of the host.
     ///     <para>
-    ///         The plugin takes over the start because the game refuses to run without the launcher marker in
-    ///         the patch directory and because it has to be started with elevation (its manifest asks for
-    ///         administrator rights).
+    ///         The plugin takes over the start because the game has to be started with elevation (its manifest
+    ///         asks for administrator rights) and because the host does not know the start contract of the game.
     ///     </para>
     /// </summary>
     public static (bool IsSupported, Task<bool> Task) LaunchGameFromGameManager(
@@ -304,60 +243,25 @@ public static class NeteaseGamesGameLauncher
                 return false;
             }
 
-            // The game refuses to start when the launcher marker is missing.
+            // The official launcher writes the channel tag of the installation when it is missing.
             PrepareLaunch(gamePath);
 
-            // The official launcher does not start the game executable itself: it copies the executable into
-            // the patch directory and starts *that* copy with the installation root as the working directory.
-            // The game checks that it is the copy that lives in "<working directory>\LocalData\Patch", and
-            // shows the dialog "请从启动器启动游戏。" otherwise.
-            string staged = Path.Combine(gamePath, NeteaseGamesPaths.LauncherMarkerRelativePath);
-            if (!File.Exists(staged))
-            {
-                staged = executable;
-            }
-
-            // The staged copy lives outside of the directory that holds the game libraries, so the loader
-            // cannot find them ("CrashHunter_PC3.dll") and the start fails with a system error dialog.
-            // The launcher therefore puts the binary directory on the search path of the child process.
-            string? previousPath = Environment.GetEnvironmentVariable("PATH");
-            try
-            {
-                Environment.SetEnvironmentVariable("PATH",
-                    $"{Path.GetDirectoryName(executable)}{Path.PathSeparator}{previousPath}");
-            }
-            catch (Exception)
-            {
-                // A missing search path is not fatal, the start reports the problem itself.
-            }
-
-            // The game expects the login state of the account in its environment. Without it the game refuses
-            // to start and shows the dialog "请从启动器启动游戏。".
+            // The game ships the account stack (UniSDK) itself and shows its own login dialog, so no login
+            // state has to be provided. A stored state is still applied when there is one.
             if (NeteaseGamesSession.ApplyStoredSession())
             {
                 SharedStatic.InstanceLogger?.LogInformation("[NeteaseGames] The stored login state was applied");
             }
-            else
-            {
-                SharedStatic.InstanceLogger?.LogWarning(
-                    "[NeteaseGames] No login state was found at {Path}, the game will refuse to start without it",
-                    NeteaseGamesSession.SessionPath);
-            }
 
-            ProcessStartInfo startInfo = new(staged)
+            ProcessStartInfo startInfo = new(executable)
             {
-                // The working directory is part of the contract: the game resolves the staged copy relative
-                // to it.
+                // The official launcher uses the installation root as the working directory.
                 WorkingDirectory = gamePath,
                 // The game executable is manifested as "requireAdministrator", so it has to be started through
                 // the shell - a plain CreateProcess would fail with ERROR_ELEVATION_REQUIRED (740).
                 UseShellExecute = true,
                 Verb = "runas",
-                // The official command line ends with the quoted takeover argument, which tells the game that
-                // the launcher hands the session over to it.
-                Arguments = QuoteArguments(CombineArguments(
-                    CombineArguments(DefaultGameArguments, BuildFileSystemArguments(gamePath)), startArgument))
-                            + " \" --takeover\""
+                Arguments = QuoteArguments(CombineArguments(DefaultGameArguments, startArgument))
             };
 
             Process? process;
@@ -367,12 +271,7 @@ public static class NeteaseGamesGameLauncher
             }
             catch (Exception)
             {
-                RestorePath(previousPath);
                 return false;
-            }
-            finally
-            {
-                RestorePath(previousPath);
             }
 
             if (process is null)
@@ -393,14 +292,11 @@ public static class NeteaseGamesGameLauncher
                 }
             }
 
-            // The staged copy only hands the start over to the real game process once the launcher session
-            // reaches it. Without that session it keeps running with a few megabytes and never starts the
-            // game, so the start is reported instead of waiting forever.
-            if (!await WaitForGameProcessAsync(gamePath, TimeSpan.FromSeconds(60), token).ConfigureAwait(false))
+            // The game opens its window a little later; until then it only holds a few hundred megabytes.
+            if (!await WaitForGameWindowAsync(gamePath, TimeSpan.FromMinutes(3), token).ConfigureAwait(false))
             {
                 SharedStatic.InstanceLogger?.LogError(
-                    "[NeteaseGames] The game did not start: the staged copy did not receive a launcher session");
-                TryKillStagedCopy(gamePath);
+                    "[NeteaseGames] The game did not open a window within three minutes");
                 return false;
             }
 
@@ -410,12 +306,11 @@ public static class NeteaseGamesGameLauncher
     }
 
     /// <summary>
-    ///     Waits until the real game process (<c>ywzh_.exe</c>) shows up.
+    ///     Waits until the game shows its window.
     /// </summary>
-    private static async Task<bool> WaitForGameProcessAsync(
+    private static async Task<bool> WaitForGameWindowAsync(
         string gameDirectory, TimeSpan timeout, CancellationToken token)
     {
-        string staged = Path.GetFileNameWithoutExtension(NeteaseGamesPaths.StagedGameExecutableName);
         DateTime deadline = DateTime.UtcNow + timeout;
 
         while (DateTime.UtcNow < deadline)
@@ -429,57 +324,31 @@ public static class NeteaseGamesGameLauncher
                 return false;
             }
 
-            foreach (Process candidate in Process.GetProcessesByName(staged))
+            foreach (string processName in GetProcessNames(gameDirectory))
             {
-                try
+                foreach (Process candidate in Process.GetProcessesByName(processName))
                 {
-                    if (candidate.WorkingSet64 > 64 * 1024 * 1024)
+                    try
                     {
-                        return true;
+                        candidate.Refresh();
+                        if (candidate.MainWindowHandle != IntPtr.Zero)
+                        {
+                            return true;
+                        }
                     }
-                }
-                catch (Exception)
-                {
-                    // The process may have exited in the meantime.
-                }
-                finally
-                {
-                    candidate.Dispose();
+                    catch (Exception)
+                    {
+                        // The process may have exited in the meantime.
+                    }
+                    finally
+                    {
+                        candidate.Dispose();
+                    }
                 }
             }
         }
 
         return false;
-    }
-
-    /// <summary>
-    ///     Kills the staged copy that is still waiting for the launcher session.
-    /// </summary>
-    private static void TryKillStagedCopy(string gameDirectory)
-    {
-        try
-        {
-            string staged = Path.GetFileNameWithoutExtension(NeteaseGamesPaths.LauncherMarkerRelativePath);
-            foreach (Process process in Process.GetProcessesByName(staged))
-            {
-                try
-                {
-                    process.Kill();
-                }
-                catch (Exception)
-                {
-                    // The process may already be gone.
-                }
-                finally
-                {
-                    process.Dispose();
-                }
-            }
-        }
-        catch (Exception)
-        {
-            // Killing the staged copy is best effort.
-        }
     }
 
     /// <summary>
@@ -598,6 +467,7 @@ public static class NeteaseGamesGameLauncher
                     }
                     catch (Exception)
                     {
+                        // The start time of an elevated process is not readable from a non elevated host.
                         gameStartTime = DateTime.Now;
                     }
 
@@ -622,23 +492,9 @@ public static class NeteaseGamesGameLauncher
 
     /// <summary>
     ///     Waits until no game process is left.
-    ///     <para>
-    ///         The game executable hands the start over to the staged build and exits immediately, so the
-    ///         lifetime of the game cannot be followed through the launched process alone.
-    ///     </para>
     /// </summary>
     private static async Task WaitForGameExitAsync(string gamePath, CancellationToken token)
     {
-        // Give the hand-over a moment, otherwise the game may not be visible yet.
-        try
-        {
-            await Task.Delay(1500, token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
-
         while (!token.IsCancellationRequested)
         {
             if (!IsRunning(gamePath))
