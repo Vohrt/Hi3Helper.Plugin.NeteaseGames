@@ -1,84 +1,80 @@
 # Hi3Helper.Plugin.NeteaseGames
 
-Collapse Launcher 的 **网易游戏** 插件（发行商 Core + 每游戏一个 preset）。
-首个支持对象：**《遗忘之海》/ Sea of Remnants**（网易自研 **Messiah** 引擎，UE4 派生）。
+Collapse Launcher 的**网易游戏**插件仓库：**一个发行商 Core + 每个游戏一个独立插件**。
 
-> 目标（**已达成**）：**完全绕过官方 PCLauncher** —— 用户只需装游戏本体，
-> 下载 / 更新 / 启动全部由 Collapse 负责，**不需要装网易官方启动器**。
+> 仓库名是 `NeteaseGames`（发行商级），但**发布出来的每个游戏都是独立的插件**（独立程序集 + 独立 zip +
+> 独立自更新目录），所以用户只下载自己玩的那款游戏。
+
+## 已支持的游戏
+
+| 游戏 | 程序集 / 短名 | 工程 | 状态 |
+|---|---|---|---|
+| 《遗忘之海》/ Sea of Remnants | **`SoR.dll`** | `Hi3Helper.Plugin.SoR` | 启动 / 版本 / 公告 已真机验证；更新链路待补松散文件下载 |
+
+新增一款网易游戏 = 新增一个 preset 工程（`Hi3Helper.Plugin.<短名>`，`AssemblyName=<短名>`）+ 在
+`release.yml` 的 `prepare` 步骤里加一行。Core 不动。
 
 ## 仓库结构
 
 ```
-Hi3Helper.NeteaseGames.Core/        发行商 Core（程序集 NeteaseGames.Core）
-Hi3Helper.Plugin.NeteaseGames/       薄插件（程序集 NeteaseGames，导出 TryGetApiExport）
-Hi3Helper.Plugin.Core/               Collapse 上游 ABI（子模块）
-tools/Indexer.exe                    生成插件 manifest 与发布包
-.github/workflows/release.yml        GitHub Actions：NativeAOT 构建 + 发 pre-release
+Hi3Helper.NeteaseGames.Core/   发行商 Core（程序集 NeteaseGames.Core，协议/下载/启动/媒体）
+Hi3Helper.Plugin.SoR/          薄插件：Sea of Remnants（程序集 SoR.dll，导出 TryGetApiExport）
+Hi3Helper.NeteaseGames.Tests/  单元测试（解析器 / 签名器 / 路径安全 / 计划模型 / 背景资源）
+Hi3Helper.Plugin.Core/         Collapse 上游 ABI（子模块）
+tools/Indexer.exe              生成插件 manifest 与发布包
+docs/re/netease-re.md          逆向与协议笔记（唯一参考）
+docs/FIX-LOG-2026-10-20.md     上一轮全量整改记录
 ```
 
-## 已实现能力
+## 当前状态（诚实版）
 
-| 能力 | 状态 | 依据 |
+| 能力 | 状态 | 说明 |
 |---|---|---|
-| **直启游戏（不走官方启动器）** | ✅ **已真机验证** | `NeteaseGamesGameLauncher`：原始 exe + 官方 4 个参数 + **工作目录=二进制目录** ⇒ 窗口标题「遗忘之海」、标题界面「开始游戏」 |
-| 检测安装（注册表 `OB_ywzh_launcher_PC` → `InstPath`） | ✅ | `InstPath` 是**启动器**目录，游戏目录 = `<启动器目录>\ywzh_extreme`（`LauncherGameDirectoryName`） |
-| 本地版本（包 / 补丁 / 引擎 / shader） | ✅ | `LocalData\Patch\pkgversion`、`patchmd5_windows64_normal.txt`、`Documents\versiondata.json` |
-| 远端版本（有无更新） | ✅ | `https://h74.update.netease.com/pl/release_patchmd5_windows64_normal.txt`（HEX_ 加密） |
-| 远端 mini-pack 清单（引擎差分块） | ✅ | `/pl/release_release_mini_pack_version.json`（20 块 / 1.39 GB） |
-| 全量文件清单（23 万文件 + 50 个 mpk 分片） | ✅ | 本地 `patchlist_windows64_normal.txt`（HEX_ 加密，17.4 MB JSON） |
-| 差分计划（文件 / 分片粒度增量，与官方一致） | ✅ | `NeteaseGamesGameInstaller.BuildPatchListPlan` |
-| 引擎（mini-pack）下载与落盘 | ✅ | `NeteaseGamesEnginePatcher`：按 `Engine\md5_engine.txt` 逐文件下载，**按大小校验** |
-| 内容下载（Range 续传 + 校验） | ✅ | `NeteaseGamesDownloader`；内容主机 `h74.gdl.netease.com` |
-| 差分应用（写包 + 索引 + 版本） | ✅ | `NeteaseGamesUpdateApplier`：写 `LocalData\Patch\` 的 .mpk/.mpkinfo |
-| 公告 / 轮播 / 背景图 | ✅ | 本地 `Documents\notice\*` + 远端 `release_launcher_notice_info.xml` |
-| 内容 CDN 的 URL 签名 | ✅ | `NeteaseGamesUrlSigner`：`key1 = md5(secret + path + key2)`、`key2 = hex(epoch + 12h)`，纯本地计算 |
-| HD server 调度服务 | ✅ | `NeteaseGamesDispatch`：`AUTH-PROJECT` / `AUTH-TOKEN` 头 + `/v2/?domain=` |
-| 原生发布（NativeAOT） | ✅ | `PublishProfiles\ReleasePublish-O2/O6.pubxml` ⇒ `NeteaseGames.dll` + manifest + zip |
-| GitHub Actions 发版 | ✅ | 打 `v*` 标签即发布 **pre-release**（v0.0.1 已发布） |
+| 检测安装 | ✅ 已验证 | 注册表 `OB_ywzh_launcher_PC` 的 `AdditionalPaths`（`InstPath` 含零宽空格，需清洗） |
+| 本地版本 | ✅ 已验证 | `pkgversion` / `patchmd5` / `versiondata.json` |
+| 远端版本（有无更新） | ✅ 已修 | 权威字段是 `@metadata@.@private_res_version@`，**不是** `normal.latest_pkgversion` |
+| 直接启动（不经官方启动器） | ✅ **真机验证** | 见 `docs/re/netease-re.md` §1 |
+| 背景 / 图标 | ✅ 已修 | 主视觉与图标**内嵌**；以 base64 交给宿主（本地路径会导致无限转圈） |
+| 公告 / 轮播 | 🟡 部分 | 远端 notice XML 可读，但其中**没有图片 URL**，轮播走本地缓存 |
+| 插件自更新 | ✅ | `cl-plugins.sakurakoi.top/SoR/` |
+| **mpk 分片增量** | 🟡 已实现，未端到端验证 | 下载 → 校验 → 按"包 → 索引 → 版本号"落盘 |
+| **松散文件增量** | 🔴 未实现 | URL 形状未定位；当前**拒绝**把更新标记为完成（不会留半更新） |
+| **全新安装（0 → 78 GB）** | 🔴 未实现 | 需要官方启动器装过一次本体 |
 
-## 关键逆向结论（详见 `docs/NETEASE-RE-NeteaseGames.md`）
-
-1. **HEX_ 清单信封**：`"HEX_"`(4 字节) + `Base64( XOR( zlib(明文), "netease_joker_h74_encrypt_key" ) )`
-2. **LCFG 启动器配置**：`"LCFG"` + `0x01` + `IV(16)` + `AES-256-CBC(无 padding)`，
-   key = `PCLauncher.exe` RVA `0x2204280` 起的 32 字节
-3. **远端清单命名规律**：`<patch_list_url>/<prefix>_<branch>_<file>`，prefix = **OB**、branch = release
-   （⚠️ 漏掉 `OB_` 前缀会拿到**陈旧分支**的清单）
-4. **差分模型**：网易没有二进制差分，就是"松散文件 + mpk 分片"粒度增量
-5. **CPS 标签**：与 HEX_ 同一套信封（无 `HEX_` 前缀）——`Base64(XOR(zlib(明文), 同一把 key))`
-6. **🎯 直启契约**（从运行中的官方启动器只读捕获，实测有效）：
-   ```
-   <游戏根>\Engine\Binaries\Win64Release\ywzh.exe
-     --start=Python --use-pso-precache=1 --python-args=innerdesktop;script_mode#RELEASE_MODE --dx12
-   ```
-   - **工作目录必须是二进制目录**（用安装根目录 ⇒ 停在 331 MB 无窗口并崩溃）
-   - **不暂存 exe 副本**、**不传 `--fs-*`**、**不传 `--takeover`**
-   - 游戏 exe 的 manifest 要求管理员 ⇒ 必须经 shell 启动（`UseShellExecute` + `runas`）
-   - **不需要登录 SDK**：游戏自带登录界面（标题界面 → 开始游戏 → 账号选择页），
-     它自己调用 UniSDK 登录；此前"必须服务端会话"的结论源于错误的启动方式
-7. **内容主机**：清单在 `h74.update.netease.com` / `h74.gph.netease.com`，
-   **引擎载荷只走 `h74.gdl.netease.com`**；路径形状 `/<版本>/<文件>`、`/<版本>/<段>/<文件>`，
-   而 **mini-pack 载荷没有版本前缀**：`/loose_file/mini_pack_<版本>/<路径>`
-8. **引擎文件清单**：`Engine\md5_engine.txt`（`<路径> <u64 哈希> <大小>`）；
-   哈希是网易私有算法 ⇒ **按大小校验**；落盘时去掉结尾的 `.1`
-9. **补丁目录归游戏管**：直启后 `pkgversion` / `pkgcheck` 由**游戏自己**刷新
-10. **调度服务**：`GET https://<边缘IP>/v2/?domain=<域名>` + 头 `AUTH-PROJECT` / `AUTH-TOKEN`
-    → `{"addrs":[...],"ttl":300}`
-
-## 构建与发布
+## 构建
 
 ```bat
 dotnet build Hi3Helper.Plugin.NeteaseGames.slnx -c Debug
+dotnet test  Hi3Helper.NeteaseGames.Tests\Hi3Helper.NeteaseGames.Tests.csproj
 ```
 
-原生发布（与其它 Collapse 插件一致）：
+单游戏原生发布：
 
 ```bat
-dotnet publish Hi3Helper.Plugin.NeteaseGames\Hi3Helper.Plugin.NeteaseGames.csproj ^
+dotnet publish Hi3Helper.Plugin.SoR\Hi3Helper.Plugin.SoR.csproj ^
   -c Release -r win-x64 /p:PublishProfile=ReleasePublish-O2
-tools\Indexer.exe Hi3Helper.Plugin.NeteaseGames\publish\Release
+tools\Indexer.exe Hi3Helper.Plugin.SoR\publish\Release
 ```
 
-> ⚠️ 不要用 `--no-restore`（会让 AOT 静默降级成 IL 程序集）。
+- `ReleasePublish-O2` = 体积优先，`ReleasePublish-O6` = 速度优先。
+- Release 配置**不产出 PDB**（PDB 会让发布包涨 3 倍并泄漏本机路径）。
+- ⚠️ 不要用 `--no-restore`：会让 NativeAOT **静默降级**成 IL 程序集。CI 有体积与 PDB 的显式检查。
 
-发版：打 `v*` 标签并推送 ⇒ GitHub Actions 自动构建并发布 **pre-release**
-（<https://github.com/Vohrt/Hi3Helper.Plugin.NeteaseGames/releases>）。
+## 发版
+
+打 `v*` 标签，或在 Actions 里手动 dispatch（可选 `version` / `game` / `publish_profile`）：
+
+1. `prepare` 解析要构建的游戏列表；
+2. `release` 按游戏矩阵分别 AOT 构建 + Indexer 打包（**每个游戏一个 zip**）；
+3. `publish-release` 把**所有游戏的 zip** 挂到同一个 GitHub Release；
+4. `publish-cdn` 把每个游戏的 `manifest.json` + `<短名>.dll` 推到 `release` 分支的 `<短名>/` 目录，
+   供插件自更新使用（`SoR/manifest.json`、`SoR/SoR.dll`）。
+
+安装时在 Collapse 里**按游戏分别安装**（`_plugins\Hi3Helper.Plugin.SoR\`）。
+
+## 安全相关的实现约定
+
+- **从不关闭 TLS 证书校验**：所有请求走 `NeteaseGamesHttp.CreateClient`。
+- 登录态（若保存）用 **DPAPI（CurrentUser）** 加密存 `session.dat`，且只在启动游戏前后短暂注入环境变量。
+- 远端清单里的路径视为**不可信输入**：落盘前校验不逃出安装目录。
+- 卸载只删"确认是游戏安装目录"的路径。
