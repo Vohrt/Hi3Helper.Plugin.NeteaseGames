@@ -30,6 +30,7 @@ public partial class NeteaseGamesGameManager : GameManagerBase
     private NeteaseGamesDelta? _delta;
     private long _remotePackageVersion;
     private bool _remoteProbed;
+    private bool _hasEngineUpdate;
 
     [field: AllowNull]
     [field: MaybeNull]
@@ -64,6 +65,20 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             lock (_syncRoot)
             {
                 return _remoteManifest;
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Whether the engine of the installation is older than the engine the remote manifest announces.
+    /// </summary>
+    public bool HasEngineUpdate
+    {
+        get
+        {
+            lock (_syncRoot)
+            {
+                return _hasEngineUpdate;
             }
         }
     }
@@ -204,6 +219,42 @@ public partial class NeteaseGamesGameManager : GameManagerBase
         CurrentGameVersion = state.PackageVersion > 0
             ? new GameVersion(0, 0, (int)state.PackageVersion, 0)
             : GameVersion.Empty;
+
+        UpdateEngineState(state);
+    }
+
+    /// <summary>
+    ///     Compares the engine version of the installation with the remote one.
+    /// </summary>
+    /// <param name="state">The local state.</param>
+    private void UpdateEngineState(NeteaseGamesLocalState state)
+    {
+        NeteaseGamesMiniPackManifest? manifest;
+        lock (_syncRoot)
+        {
+            manifest = _remoteManifest;
+        }
+
+        if (manifest is null || string.IsNullOrEmpty(manifest.CurrentVersion))
+        {
+            return;
+        }
+
+        // The engine version of the installation is the one of the engine build, the latest one is the one
+        // the launcher wrote after it prepared the new engine.
+        string local = state.EngineVersion;
+        if (string.IsNullOrEmpty(local))
+        {
+            local = state.LatestEngineVersion;
+        }
+
+        bool update = !string.IsNullOrEmpty(local) &&
+                      !string.Equals(local, manifest.CurrentVersion, StringComparison.Ordinal);
+
+        lock (_syncRoot)
+        {
+            _hasEngineUpdate = update;
+        }
     }
 
     /// <summary>
@@ -236,6 +287,11 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             SharedStatic.InstanceLogger?.LogInformation(
                 "[NeteaseGames] Remote mini pack: version={Version}, engine={Engine}, blocks={Blocks}, size={Size}",
                 manifest.CurrentVersion, manifest.EngineVersion, manifest.DownloadInfo.Count, manifest.TotalDownloadSize);
+
+            if (!string.IsNullOrEmpty(CurrentGameInstallPath))
+            {
+                UpdateEngineState(NeteaseGamesLocalState.Read(CurrentGameInstallPath));
+            }
         }
         catch (OperationCanceledException)
         {

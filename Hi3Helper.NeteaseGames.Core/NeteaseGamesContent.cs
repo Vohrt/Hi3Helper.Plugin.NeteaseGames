@@ -35,6 +35,20 @@ public static class NeteaseGamesContentEndpoints
         "h74-19.gph.netease.com"
     ];
 
+    /// <summary>
+    ///     The host that serves the engine payload (the mini pack).
+    ///     <para>
+    ///         The payload lives below <c>/loose_file/mini_pack_&lt;version&gt;/</c> and is only available on the
+    ///         game download host; the regular content hosts answer with 404 for it.
+    ///     </para>
+    /// </summary>
+    public const string EnginePayloadHost = "h74.gdl.netease.com";
+
+    /// <summary>
+    ///     The hosts that may serve the engine payload.
+    /// </summary>
+    public static IReadOnlyList<string> GetEnginePayloadHosts() => [EnginePayloadHost];
+
     /// <summary>The name of the full file list.</summary>
     public const string PatchListFileName = "patchlist_windows64_normal.txt";
 

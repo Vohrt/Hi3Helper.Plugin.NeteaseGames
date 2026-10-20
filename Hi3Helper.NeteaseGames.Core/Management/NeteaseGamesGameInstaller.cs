@@ -152,14 +152,28 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
             return;
         }
 
-        // The engine (the mini pack) is a separate download that the official launcher performs first; the
-        // location of its blocks on the content host is not known yet, so it is reported instead of being
-        // downloaded with a wrong URL.
-        if (manager.RemotePackageVersion > 0)
+        // The engine payload (the mini pack) is a separate download that the official launcher performs
+        // before the patch. It is a list of loose files below /loose_file/mini_pack_<version>/ on the game
+        // download host, so it can be applied the same way.
+        NeteaseGamesMiniPackManifest? miniPack = manager.RemoteManifest;
+        bool engineMissing = !File.Exists(Path.Combine(gamePath, NeteaseGamesPaths.GameExecutableRelativePath));
+        if (miniPack is not null && !string.IsNullOrEmpty(miniPack.LooseFileParentDir) &&
+            (engineMissing || manager.HasEngineUpdate))
         {
-            SharedStatic.InstanceLogger?.LogInformation(
-                "[NeteaseGames] Engine mini pack {Version} is not part of the patch download yet",
-                manifest.EngineVersion);
+            progressStateDelegate?.Invoke(InstallProgressState.Download);
+
+            bool engineOk = await NeteaseGamesEnginePatcher.ApplyAsync(
+                CreateHttpClient(),
+                gamePath,
+                miniPack.LooseFileParentDir,
+                NeteaseGamesContentEndpoints.GetEnginePayloadHosts(),
+                bytes => ReportProgress(progressDelegate, bytes, miniPack.TotalDownloadSize, 0, 1),
+                token).ConfigureAwait(false);
+
+            if (!engineOk)
+            {
+                throw new IOException("The engine payload could not be applied.");
+            }
         }
 
         NeteaseGamesPatchList? localList = NeteaseGamesLocalState.ReadPatchList(gamePath);
