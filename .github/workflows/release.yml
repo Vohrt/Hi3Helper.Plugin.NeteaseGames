@@ -128,24 +128,27 @@ jobs:
 
           $project = '${{ matrix.game.project }}\${{ matrix.game.project }}.csproj'
           Write-Host "Publishing $($project) version $version with $profile"
+
+          $log = 'publish.log'
           dotnet publish $project `
             -c Release -r win-x64 `
             /p:PublishProfile=$profile `
             /p:Version=$version `
             /p:AssemblyVersion=$version `
-            /p:FileVersion=$version
-          if ($LASTEXITCODE -ne 0) {
-            # Re-run with verbose output captured, and surface the interesting lines as annotations so the
-            # failure is diagnosable without downloading the raw log.
-            $log = 'publish.log'
-            dotnet publish $project -c Release -r win-x64 /p:PublishProfile=$profile /p:Version=$version -v:n *>&1 |
-              Tee-Object -FilePath $log | Out-Host
+            /p:FileVersion=$version `
+            -v:n *>&1 | Tee-Object -FilePath $log | Out-Host
+          $code = $LASTEXITCODE
 
-            Select-String -Path $log -Pattern 'error|link\.exe|MSB|ILC|LNK' |
-              Select-Object -First 25 |
-              ForEach-Object { Write-Host "::error::$($_.Line.Trim())" }
-
-            throw "dotnet publish failed with exit code $LASTEXITCODE"
+          if ($code -ne 0) {
+            # Surface the interesting lines as annotations: the raw log is not downloadable without
+            # authentication, so the failure has to be visible here.
+            Write-Host "=== publish failed with exit code $code, first errors:"
+            $errors = Select-String -Path $log -Pattern 'error |error:|LNK\d|link\.exe|MSB\d+|ILC' |
+                        Select-Object -First 30
+            foreach ($e in $errors) { Write-Host "::error::$($e.Line.Trim())" }
+            Write-Host "=== last 40 lines:"
+            Get-Content $log -Tail 40 | ForEach-Object { Write-Host $_ }
+            throw "dotnet publish failed with exit code $code"
           }
 
       # A silent downgrade to a managed IL build (a few hundred KB) is a known AOT pitfall; the Indexer then
