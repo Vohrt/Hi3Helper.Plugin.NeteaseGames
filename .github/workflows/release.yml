@@ -81,10 +81,23 @@ jobs:
           if (Test-Path $publish) { Remove-Item $publish -Recurse -Force }
           Write-Host "Publish directory is clean"
 
+      # The test project is its own runner (Microsoft.Testing.Platform + xunit v3), so the test executable
+      # runs the suite in process. `dotnet test` would go through a MSBuild named pipe and, on some hosts, the
+      # classic vstest testhost; running the executable directly is simpler and always works.
       - name: Unit tests
-        if: matrix.game.short == 'SoR'
         shell: pwsh
-        run: dotnet test Hi3Helper.NeteaseGames.Tests\Hi3Helper.NeteaseGames.Tests.csproj -c Release --logger "console;verbosity=normal"
+        run: |
+          $project = 'Hi3Helper.NeteaseGames.Tests\Hi3Helper.NeteaseGames.Tests.csproj'
+          dotnet build $project -c Release
+          if ($LASTEXITCODE -ne 0) { throw "Building the tests failed with exit code $LASTEXITCODE" }
+
+          $exe = Get-ChildItem 'Hi3Helper.NeteaseGames.Tests\bin\Release' -Recurse -Filter 'Hi3Helper.NeteaseGames.Tests.exe' |
+                   Select-Object -First 1
+          if (-not $exe) { throw "The test executable was not produced" }
+
+          Write-Host "Running $($exe.FullName)"
+          & $exe.FullName
+          if ($LASTEXITCODE -ne 0) { throw "The tests failed with exit code $LASTEXITCODE" }
 
       - name: Publish (NativeAOT)
         shell: pwsh

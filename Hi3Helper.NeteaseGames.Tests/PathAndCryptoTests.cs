@@ -65,7 +65,7 @@ public class PathSafetyTests
     [Fact]
     public void IsGameDirectory_AcceptsADirectoryWithTheExecutable()
     {
-        string directory = Path.Combine(Path.GetTempPath(), "netease-gamedir-" + Guid.NewGuid().ToString("N"));
+        string directory = Path.Combine(AppContext.BaseDirectory, "gamedir-" + Guid.NewGuid().ToString("N"));
         string executable = Path.Combine(directory, NeteaseGamesPaths.GameExecutableRelativePath);
         try
         {
@@ -261,7 +261,8 @@ public class UrlSignerTests
         string signed = NeteaseGamesUrlSigner.Sign("https://h74.gph.netease.com/v/file", DateTimeOffset.UnixEpoch);
 
         Assert.Contains("?key1=", signed, StringComparison.Ordinal);
-        Assert.Contains("&key2=7f1c8c38", signed, StringComparison.Ordinal);
+        // UnixEpoch + the 12 hour offset is 43200 seconds = 0000a8c0.
+        Assert.Contains("&key2=0000a8c0", signed, StringComparison.Ordinal);
     }
 
     [Theory]
