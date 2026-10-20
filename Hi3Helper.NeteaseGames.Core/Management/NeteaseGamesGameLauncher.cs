@@ -54,8 +54,9 @@ public static class NeteaseGamesGameLauncher
 
         ProcessStartInfo startInfo = new(executable)
         {
-            // The official launcher uses the installation root as the working directory.
-            WorkingDirectory = gameDirectory,
+            // The game resolves its resources relative to the working directory, so it has to be the
+            // directory of the game executable (verified: with the installation root the game crashes).
+            WorkingDirectory = Path.GetDirectoryName(executable) ?? gameDirectory,
             // The game executable is manifested as "requireAdministrator", so it has to be started through the
             // shell - a plain CreateProcess would fail with ERROR_ELEVATION_REQUIRED (740).
             UseShellExecute = true,
@@ -255,8 +256,9 @@ public static class NeteaseGamesGameLauncher
 
             ProcessStartInfo startInfo = new(executable)
             {
-                // The official launcher uses the installation root as the working directory.
-                WorkingDirectory = gamePath,
+                // The game resolves its resources relative to the working directory, so it has to be the
+                // directory of the game executable (verified: with the installation root the game crashes).
+                WorkingDirectory = Path.GetDirectoryName(executable) ?? gamePath,
                 // The game executable is manifested as "requireAdministrator", so it has to be started through
                 // the shell - a plain CreateProcess would fail with ERROR_ELEVATION_REQUIRED (740).
                 UseShellExecute = true,
