@@ -307,6 +307,19 @@ public static class NeteaseGamesGameLauncher
                 // A missing search path is not fatal, the start reports the problem itself.
             }
 
+            // The game expects the login state of the account in its environment. Without it the game refuses
+            // to start and shows the dialog "请从启动器启动游戏。".
+            if (NeteaseGamesSession.ApplyStoredSession())
+            {
+                SharedStatic.InstanceLogger?.LogInformation("[NeteaseGames] The stored login state was applied");
+            }
+            else
+            {
+                SharedStatic.InstanceLogger?.LogWarning(
+                    "[NeteaseGames] No login state was found at {Path}, the game will refuse to start without it",
+                    NeteaseGamesSession.SessionPath);
+            }
+
             ProcessStartInfo startInfo = new(staged)
             {
                 // The working directory is part of the contract: the game resolves the staged copy relative
