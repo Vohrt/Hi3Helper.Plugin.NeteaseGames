@@ -214,8 +214,14 @@ public partial class NeteaseGamesGameManager : GameManagerBase
         }
 
         NeteaseGamesLocalState state = NeteaseGamesLocalState.Read(path);
-        CurrentGameVersion = state.PackageVersion > 0
-            ? new GameVersion(0, 0, (int)state.PackageVersion, 0)
+
+        // The version the host compares against the remote one must be the same counter the remote manifest
+        // reports: the resource/patch version. `pkgversion` is a different counter (the package version), and
+        // comparing it against the remote resource version made the plugin claim a permanent update
+        // (local 6521279 vs remote 6534552, while the installation was actually up to date).
+        long localVersion = state.PatchVersion > 0 ? state.PatchVersion : state.PackageVersion;
+        CurrentGameVersion = localVersion > 0
+            ? new GameVersion(0, 0, (int)localVersion, 0)
             : GameVersion.Empty;
 
         UpdateEngineState(state);

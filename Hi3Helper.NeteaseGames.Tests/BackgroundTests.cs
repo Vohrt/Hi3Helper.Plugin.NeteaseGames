@@ -72,22 +72,30 @@ public class BackgroundTests
     }
 
     [Fact]
-    public void EnumerateNoticeImageUrls_DeduplicatesAndSkipsNonHttp()
+    public void EnumerateNoticeImageUrls_ReturnsBannerEntriesOnly()
     {
+        // The artwork is not part of the manifest: it lives in the entry documents, so this enumeration only
+        // reports the banner entries (whose documents carry the 1920x1080 key visuals).
         const string xml = """
             <root>
+              <AnnounceInfo>
+                <AnnounceItem title="one:185">
+                  <url title="zh_CN">https://h74.update.netease.com/game_notice/announce_zh_CN</url>
+                </AnnounceItem>
+              </AnnounceInfo>
               <ActivityInfo>
                 <ActivityItem title="one:186"><img>https://h74.update.netease.com/game_notice/image/111.png</img></ActivityItem>
-                <ActivityItem title="one:164"><img>https://h74.update.netease.com/game_notice/image/111.png</img></ActivityItem>
-                <ActivityItem title="one:160"><img>/relative/222.jpg</img></ActivityItem>
               </ActivityInfo>
+              <BannerItem title="one:206">
+                <url title="zh_CN">https://h74.update.netease.com/game_notice/banner_zh_CN</url>
+              </BannerItem>
             </root>
             """;
 
         List<string> urls = NeteaseGamesLauncherApiNews.EnumerateNoticeImageUrls(xml).ToList();
 
         Assert.Single(urls);
-        Assert.StartsWith("https://", urls[0], StringComparison.Ordinal);
+        Assert.Equal("https://h74.update.netease.com/game_notice/banner_zh_CN", urls[0]);
     }
 
     [Fact]

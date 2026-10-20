@@ -79,8 +79,20 @@ public static class NeteaseGamesPaths
 
     /// <summary>
     ///     The registry key the official launcher writes its paths into.
+    ///     <para>
+    ///         ⚠ This is the <b>leaf key name</b> only. The host composes the path the same way the official
+    ///         launcher does - <c>Software\{vendor}\{this}</c> - so a value that already contains
+    ///         <c>Software\</c> would end up as <c>Software\NetEase\Software\OB_ywzh_launcher_PC</c> and every
+    ///         read of it would warn that the key is missing.
+    ///     </para>
     /// </summary>
-    public const string RegistryKeyName = @"Software\OB_ywzh_launcher_PC";
+    public const string RegistryKeyName = "OB_ywzh_launcher_PC";
+
+    /// <summary>
+    ///     The full path of the launcher key below <c>HKEY_CURRENT_USER</c> (used for the installation
+    ///     discovery, which reads the key directly).
+    /// </summary>
+    public const string RegistryKeyPath = @"Software\" + RegistryKeyName;
 
     /// <summary>
     ///     The registry value that holds the game directories.
@@ -307,7 +319,7 @@ public sealed class NeteaseGamesLocalState
         {
             try
             {
-                using RegistryKey? key = hive.OpenSubKey(NeteaseGamesPaths.RegistryKeyName);
+                using RegistryKey? key = hive.OpenSubKey(NeteaseGamesPaths.RegistryKeyPath);
                 if (key is null)
                 {
                     continue;
