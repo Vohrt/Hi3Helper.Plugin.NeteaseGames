@@ -10,13 +10,34 @@ namespace Hi3Helper.NeteaseGames.Tests;
 public class RegistryKeyTests
 {
     [Fact]
-    public void RegistryKeyName_IsLeafNameOnly()
+    public void LauncherKey_IsTheOfficialKeyAndUsedForDetection()
     {
-        // The host composes Software\{vendor}\{this}, so a value containing "Software\" became
-        // Software\NetEase\Software\OB_ywzh_launcher_PC and warned on every read.
-        Assert.DoesNotContain('\\', NeteaseGamesPaths.RegistryKeyName);
-        Assert.Equal("OB_ywzh_launcher_PC", NeteaseGamesPaths.RegistryKeyName);
+        // The official launcher keeps InstPath / AdditionalPaths / APP_EXE_NAME here and creates no sub keys.
+        Assert.Equal("OB_ywzh_launcher_PC", NeteaseGamesPaths.LauncherRegistryKeyName);
         Assert.Equal(@"Software\OB_ywzh_launcher_PC", NeteaseGamesPaths.RegistryKeyPath);
+    }
+
+    [Fact]
+    public void SettingsKey_SitsBelowTheOfficialLauncherKey()
+    {
+        // The host composes Software\{vendor}\{game}; naming the vendor after the launcher key puts the Collapse
+        // settings below the official key instead of next to it, so the launcher's own values stay untouched.
+        Assert.Equal("OB_ywzh_launcher_PC", NeteaseGamesPaths.CollapseSettingsVendorName);
+        Assert.Equal("Collapse", NeteaseGamesPaths.CollapseSettingsKeyName);
+
+        string composed = $@"Software\{NeteaseGamesPaths.CollapseSettingsVendorName}\{NeteaseGamesPaths.CollapseSettingsKeyName}";
+        Assert.Equal(@"Software\OB_ywzh_launcher_PC\Collapse", composed);
+
+        // Neither segment may contain a separator of its own (the host joins them).
+        Assert.DoesNotContain('\\', NeteaseGamesPaths.CollapseSettingsVendorName);
+        Assert.DoesNotContain('\\', NeteaseGamesPaths.CollapseSettingsKeyName);
+    }
+
+    [Fact]
+    public void SettingsKey_IsNotTheLauncherKeyItself()
+    {
+        // Writing the Collapse settings into the launcher key would mix them with the launcher's own values.
+        Assert.NotEqual(NeteaseGamesPaths.LauncherRegistryKeyName, NeteaseGamesPaths.CollapseSettingsKeyName);
     }
 }
 

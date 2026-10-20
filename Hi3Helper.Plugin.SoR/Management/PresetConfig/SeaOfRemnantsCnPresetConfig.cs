@@ -69,9 +69,15 @@ public partial class SeaOfRemnantsCnPresetConfig : PluginPresetConfigBase
 
     public override string GameLogFileName => string.Empty;
 
-    public override string GameVendorName => "NetEase";
+    /// <summary>
+    ///     The host composes the settings key as <c>Software\{vendor}\{game}</c>. Naming the vendor after the
+    ///     official launcher key places the Collapse settings <b>below</b> it
+    ///     (<c>Software\OB_ywzh_launcher_PC\Collapse</c>): the launcher keeps its own values in the parent key
+    ///     untouched and it is obvious that the child key belongs to Collapse.
+    /// </summary>
+    public override string GameVendorName => NeteaseGamesPaths.CollapseSettingsVendorName;
 
-    public override string GameRegistryKeyName => NeteaseGamesPaths.RegistryKeyName;
+    public override string GameRegistryKeyName => NeteaseGamesPaths.CollapseSettingsKeyName;
 
     public override string ProfileName => "SeaOfRemnants";
 

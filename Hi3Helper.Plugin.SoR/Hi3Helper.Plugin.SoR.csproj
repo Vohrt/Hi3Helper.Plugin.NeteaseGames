@@ -18,7 +18,7 @@
         <Company>CollapsePlugin</Company>
         <Authors>$(Company).</Authors>
         <Copyright>Copyright 2026 $(Company)</Copyright>
-        <Version>0.1.2</Version>
+        <Version>0.1.3</Version>
         <Configurations>Debug;Release;DebugNoReflection;ReleaseNoReflection</Configurations>
         <Title>Hi3Helper.Plugin.SoR</Title>
     </PropertyGroup>

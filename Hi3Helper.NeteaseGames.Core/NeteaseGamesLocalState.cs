@@ -78,21 +78,36 @@ public static class NeteaseGamesPaths
     public const string PackageCheckFileName = "pkgcheck";
 
     /// <summary>
-    ///     The registry key the official launcher writes its paths into.
+    ///     The key the official launcher owns, relative to <c>HKEY_CURRENT_USER</c>.
     ///     <para>
-    ///         ⚠ This is the <b>leaf key name</b> only. The host composes the path the same way the official
-    ///         launcher does - <c>Software\{vendor}\{this}</c> - so a value that already contains
-    ///         <c>Software\</c> would end up as <c>Software\NetEase\Software\OB_ywzh_launcher_PC</c> and every
-    ///         read of it would warn that the key is missing.
+    ///         The launcher stores only values in it (<c>InstPath</c>, <c>AdditionalPaths</c>,
+    ///         <c>APP_EXE_NAME</c>) and creates no sub keys, so it can safely act as the parent of the key the
+    ///         host uses for the Collapse specific settings of this game.
     ///     </para>
     /// </summary>
-    public const string RegistryKeyName = "OB_ywzh_launcher_PC";
+    public const string LauncherRegistryKeyName = "OB_ywzh_launcher_PC";
 
     /// <summary>
     ///     The full path of the launcher key below <c>HKEY_CURRENT_USER</c> (used for the installation
     ///     discovery, which reads the key directly).
     /// </summary>
-    public const string RegistryKeyPath = @"Software\" + RegistryKeyName;
+    public const string RegistryKeyPath = @"Software\" + LauncherRegistryKeyName;
+
+    /// <summary>
+    ///     The <c>GameVendorName</c> of the preset.
+    ///     <para>
+    ///         The host composes the settings key as <c>Software\{vendor}\{game}</c>. Naming the vendor after the
+    ///         launcher key puts the Collapse settings <b>below the official key</b>
+    ///         (<c>Software\OB_ywzh_launcher_PC\Collapse</c>) instead of next to it - the launcher keeps its own
+    ///         values in the parent key untouched, and it is obvious who owns the child key.
+    ///     </para>
+    /// </summary>
+    public const string CollapseSettingsVendorName = LauncherRegistryKeyName;
+
+    /// <summary>
+    ///     The <c>GameRegistryKeyName</c> of the preset (the leaf key that holds the Collapse settings).
+    /// </summary>
+    public const string CollapseSettingsKeyName = "Collapse";
 
     /// <summary>
     ///     The registry value that holds the game directories.
