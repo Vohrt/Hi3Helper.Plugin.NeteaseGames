@@ -240,10 +240,10 @@ jobs:
           # Start from the current release branch so the other games' directories survive.
           if git fetch origin release 2>/dev/null && git rev-parse --verify --quiet origin/release >/dev/null; then
             echo "=== updating the existing release branch"
-            git checkout -B release origin/release
+            git checkout -B release origin/release 2>&1 || { echo "::error::checkout release failed"; exit 1; }
           else
             echo "=== creating the release branch"
-            git checkout --orphan release
+            git checkout --orphan release 2>&1 || { echo "::error::orphan checkout failed"; exit 1; }
             git rm -rf . >/dev/null 2>&1 || true
           fi
 
@@ -270,4 +270,4 @@ jobs:
           else
             git commit -m "Publish auto-update files"
           fi
-          git push origin HEAD:release --force 2>&1
+          git push origin HEAD:release --force 2>&1 || { echo "::error::push failed (see output above)"; exit 1; }
