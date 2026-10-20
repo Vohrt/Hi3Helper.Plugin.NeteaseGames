@@ -5,7 +5,7 @@ using System.Threading.Tasks;
 using Hi3Helper.NeteaseGames.Core.Management;
 using Hi3Helper.Plugin.Core.Utility;
 
-namespace Hi3Helper.Plugin.NeteaseGames;
+namespace Hi3Helper.Plugin.SoR;
 
 public partial class Exports
 {

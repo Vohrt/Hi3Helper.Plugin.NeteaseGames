@@ -3,13 +3,13 @@ using System.Runtime.InteropServices;
 using Hi3Helper.Plugin.Core;
 using Hi3Helper.Plugin.Core.Management;
 
-namespace Hi3Helper.Plugin.NeteaseGames;
+namespace Hi3Helper.Plugin.SoR;
 
 public partial class Exports : SharedStaticV1Ext<Exports>
 {
     static Exports()
     {
-        Load<NeteaseGamesPlugin>(!RuntimeFeature.IsDynamicCodeCompiled ? new GameVersion(1, 0, 0, 0) : default);
+        Load<SeaOfRemnantsPlugin>(!RuntimeFeature.IsDynamicCodeCompiled ? new GameVersion(1, 0, 0, 0) : default);
     }
 
     [UnmanagedCallersOnly(EntryPoint = "TryGetApiExport", CallConvs = [typeof(CallConvCdecl)])]

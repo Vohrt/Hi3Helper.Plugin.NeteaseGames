@@ -10,17 +10,25 @@
         <DebugType>embedded</DebugType>
         <Deterministic>true</Deterministic>
         <LangVersion>preview</LangVersion>
-        <AssemblyName>NeteaseGames</AssemblyName>
-        <ProductName>NetEase Games Plugin</ProductName>
+        <AssemblyName>SoR</AssemblyName>
+        <ProductName>Sea of Remnants Plugin</ProductName>
         <Product>Collapse</Product>
-        <Description>This library is a plugin for adding support for NetEase published games (e.g. Sea of Remnants / 遗忘之海) into Collapse Launcher</Description>
-        <AssemblyTitle>NetEase Games Plugin</AssemblyTitle>
+        <Description>This library is a plugin for adding support for Sea of Remnants / 遗忘之海 (NetEase) into Collapse Launcher</Description>
+        <AssemblyTitle>Sea of Remnants Plugin</AssemblyTitle>
         <Company>CollapsePlugin</Company>
         <Authors>$(Company).</Authors>
         <Copyright>Copyright 2026 $(Company)</Copyright>
         <Version>0.0.1</Version>
         <Configurations>Debug;Release;DebugNoReflection;ReleaseNoReflection</Configurations>
-        <Title>Hi3Helper.Plugin.NeteaseGames</Title>
+        <Title>Hi3Helper.Plugin.SoR</Title>
+    </PropertyGroup>
+
+    <!-- Release builds ship without symbols: the NativeAOT step would otherwise write a multi-megabyte PDB
+         into the publish directory, which triples the auto-update payload and leaks local source paths.
+         Debug configurations keep their symbols. -->
+    <PropertyGroup Condition="'$(Configuration)'=='Release' Or '$(Configuration)'=='ReleaseNoReflection'">
+        <DebugType>none</DebugType>
+        <DebugSymbols>false</DebugSymbols>
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)'=='DebugNoReflection'">
@@ -36,6 +44,13 @@
     <ItemGroup>
         <ProjectReference Include="..\Hi3Helper.Plugin.Core\Hi3Helper.Plugin.Core.csproj"/>
         <ProjectReference Include="..\Hi3Helper.NeteaseGames.Core\Hi3Helper.NeteaseGames.Core.csproj"/>
+    </ItemGroup>
+
+    <!-- The icon is the application icon of the game itself, the poster is its key visual. Both are embedded
+         with a logical name so that Plugin.GetPluginAppIconUrl can read them without touching the disk. -->
+    <ItemGroup>
+        <EmbeddedResource Include="Assets\icon.png" LogicalName="icon.png"/>
+        <EmbeddedResource Include="Assets\poster.jpg" LogicalName="poster.jpg"/>
     </ItemGroup>
 
 </Project>

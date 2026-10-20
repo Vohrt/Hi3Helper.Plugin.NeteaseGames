@@ -13,7 +13,7 @@ using Hi3Helper.Plugin.Core.Management.Api;
 using Hi3Helper.Plugin.Core.Management.PresetConfig;
 using Microsoft.Extensions.Logging;
 
-namespace Hi3Helper.Plugin.NeteaseGames.Management.PresetConfig;
+namespace Hi3Helper.Plugin.SoR.Management.PresetConfig;
 
 /// <summary>
 ///     The CN (国服) preset of 《遗忘之海》 / Sea of Remnants.
@@ -67,7 +67,7 @@ public partial class SeaOfRemnantsCnPresetConfig : PluginPresetConfigBase
         }
     }
 
-    public override string GameLogFileName => "ywzh.log";
+    public override string GameLogFileName => string.Empty;
 
     public override string GameVendorName => "NetEase";
 
@@ -81,11 +81,11 @@ public partial class SeaOfRemnantsCnPresetConfig : PluginPresetConfigBase
 
     public override string ZoneFullName => "遗忘之海 (中国大陆)";
 
-    public override string ZoneLogoUrl => "https://h74.update.netease.com/game_notice/image/095541248827.png";
+    public override string ZoneLogoUrl => NeteaseGamesEndpoints.NoticeImageBaseUrl + "095541248827.png";
 
-    public override string ZonePosterUrl => "https://h74.update.netease.com/game_notice/image/270811864061.png";
+    public override string ZonePosterUrl => NeteaseGamesEndpoints.BackgroundFallbackUrl;
 
-    public override string ZoneHomePageUrl => "https://sea.163.com/";
+    public override string ZoneHomePageUrl => NeteaseGamesEndpoints.HomePageUrl;
 
     public override GameReleaseChannel ReleaseChannel => GameReleaseChannel.Public;
 
@@ -93,6 +93,9 @@ public partial class SeaOfRemnantsCnPresetConfig : PluginPresetConfigBase
 
     public override string LauncherGameDirectoryName => "ywzh_extreme";
 
+    /// <summary>
+    ///     The languages the client ships text for (the notice cache of the game carries all of them).
+    /// </summary>
     public override List<string> SupportedLanguages =>
     [
         "zh_CN",
@@ -109,6 +112,9 @@ public partial class SeaOfRemnantsCnPresetConfig : PluginPresetConfigBase
 
     #region API instances
 
+    // The base class nulls these slots when it is freed. The instances below are owned by this preset, so the
+    // setter has to accept the null that the base hands over - silently ignoring it would leave freed objects
+    // reachable through the property.
     public override ILauncherApiMedia? LauncherApiMedia
     {
         get => _launcherApiMedia;
@@ -138,7 +144,8 @@ public partial class SeaOfRemnantsCnPresetConfig : PluginPresetConfigBase
     /// <inheritdoc/>
     protected override async Task<int> InitAsync(CancellationToken token)
     {
-        // Locate the installation (if the host did not set the path yet) and fetch the remote version.
+        // Locate the installation (if the host did not set the path yet) so the version can be answered
+        // synchronously right afterwards.
         string? path = GetGamePath();
         if (string.IsNullOrEmpty(path))
         {
@@ -149,17 +156,10 @@ public partial class SeaOfRemnantsCnPresetConfig : PluginPresetConfigBase
             }
         }
 
-        try
+        // The manager bounds this call itself (the host awaits this hook while the launcher UI loads).
+        if (!string.IsNullOrEmpty(GetGamePath()))
         {
-            await _gameManager.ProbeRemoteVersionAsync(token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            return 0;
-        }
-        catch (Exception ex)
-        {
-            SharedStatic.InstanceLogger?.LogWarning("[SeaOfRemnants] Failed to probe the remote version: {Msg}", ex.Message);
+            await _gameManager.InitAsyncInternal(token).ConfigureAwait(false);
         }
 
         return 0;
@@ -168,7 +168,10 @@ public partial class SeaOfRemnantsCnPresetConfig : PluginPresetConfigBase
     /// <inheritdoc/>
     public override void Dispose()
     {
+        // The base class frees the media / news / manager instances it can reach through its own slots; the
+        // installer is not part of that list and is released here.
         _gameInstaller.Dispose();
         base.Dispose();
+        GC.SuppressFinalize(this);
     }
 }
