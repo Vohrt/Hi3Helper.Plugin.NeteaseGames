@@ -4,6 +4,10 @@ obj/
 publish/
 *.user
 *.suo
+TestResults/
+
+## Symbols are never part of a release (the publish profiles already set DebugType=none)
+*.pdb
 
 ## IDE
 .vs/

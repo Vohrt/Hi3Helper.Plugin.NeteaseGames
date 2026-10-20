@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace Hi3Helper.NeteaseGames.Core;
@@ -10,7 +12,12 @@ namespace Hi3Helper.NeteaseGames.Core;
 ///     <para>
 ///         The game receives the state through the environment: it parses <c>UNISDK_LOGIN_JSON</c> and reads
 ///         the Jelly (JF) tokens from the sibling variables. The official launcher fills them after the
-///         UniSDK login; the plugin does the same with a login state that it keeps on disk.
+///         UniSDK login.
+///     </para>
+///     <para>
+///         The state is a credential: it allows acting as the account. It is therefore kept encrypted with
+///         DPAPI (<see cref="DataProtectionScope.CurrentUser" />) and only decrypted right before it is
+///         applied to a game process.
 ///     </para>
 /// </summary>
 public sealed class NeteaseGamesLoginState
@@ -126,25 +133,19 @@ public sealed class NeteaseGamesLoginState
     }
 
     /// <summary>
-    ///     Reads a login state from a JSON file.
+    ///     Parses a login state from its JSON representation (the token values, not the encrypted store).
     /// </summary>
-    /// <param name="path">The path of the file.</param>
-    /// <returns>The state or null when the file does not exist or cannot be read.</returns>
-    public static NeteaseGamesLoginState? TryRead(string path)
+    /// <param name="text">The JSON text.</param>
+    /// <returns>The state, or <c>null</c> when the text is not a valid state.</returns>
+    public static NeteaseGamesLoginState? TryParse(string text)
     {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
         try
         {
-            if (!File.Exists(path))
-            {
-                return null;
-            }
-
-            string text = File.ReadAllText(path);
-            if (text.Length == 0)
-            {
-                return null;
-            }
-
             using JsonDocument document = JsonDocument.Parse(text);
             JsonElement root = document.RootElement;
 
@@ -174,16 +175,46 @@ public sealed class NeteaseGamesLoginState
 
             return state;
         }
-        catch (Exception)
+        catch (JsonException)
         {
             return null;
         }
     }
 
     /// <summary>
-    ///     Writes the login state to a JSON file.
+    ///     Reads the encrypted login state from disk.
     /// </summary>
-    /// <param name="path">The path of the file.</param>
+    /// <param name="path">The path of the encrypted store.</param>
+    /// <returns>The state, or <c>null</c> when the file is missing or cannot be decrypted for this user.</returns>
+    public static NeteaseGamesLoginState? TryRead(string path)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            byte[] protectedBytes = File.ReadAllBytes(path);
+            if (protectedBytes.Length == 0)
+            {
+                return null;
+            }
+
+            byte[] plain = ProtectedData.Unprotect(protectedBytes, optionalEntropy: null,
+                DataProtectionScope.CurrentUser);
+            return TryParse(Encoding.UTF8.GetString(plain));
+        }
+        catch (Exception ex) when (ex is IOException or CryptographicException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    ///     Writes the login state to disk, encrypted with DPAPI for the current user.
+    /// </summary>
+    /// <param name="path">The path of the encrypted store.</param>
     public void Save(string path)
     {
         string? directory = Path.GetDirectoryName(path);
@@ -210,9 +241,15 @@ public sealed class NeteaseGamesLoginState
             ["extra"] = Extra
         };
 
-        File.WriteAllText(path, JsonSerializer.Serialize(root, new JsonSerializerOptions { WriteIndented = true }));
-    }
+        string json = JsonSerializer.Serialize(root);
+        byte[] plain = Encoding.UTF8.GetBytes(json);
+        byte[] protectedBytes = ProtectedData.Protect(plain, optionalEntropy: null,
+            DataProtectionScope.CurrentUser);
 
+        string temporary = path + ".tmp";
+        File.WriteAllBytes(temporary, protectedBytes);
+        File.Move(temporary, path, overwrite: true);
+    }
     private static string? GetString(JsonElement element, string name)
         => element.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
@@ -225,73 +262,9 @@ public sealed class NeteaseGamesLoginState
 public static class NeteaseGamesSession
 {
     /// <summary>
-    ///     The name of the file the plugin keeps the login state in.
+    ///     The name of the file the plugin keeps the (encrypted) login state in.
     /// </summary>
-    public const string SessionFileName = "session.json";
-
-    /// <summary>
-    ///     The UniSDK application key of the game (found in the game process).
-    /// </summary>
-    public const string UniSdkAppKey = "B91xFDWsRsEu41otp8JR7Clt03QCpjhI";
-
-    /// <summary>
-    ///     The UniSDK project of the game (the directory the SDK stores its data in).
-    /// </summary>
-    public const string UniSdkProject = "ywzh";
-
-    /// <summary>
-    ///     The name of the file that lists the UniSDK modules that may be loaded
-    ///     (<c>&lt;dll&gt;&amp;&lt;version&gt;</c> per line, base64 encoded).
-    /// </summary>
-    public const string UniSdkWhitelistFileName = "unisdk_dll_load_whitelist";
-
-    /// <summary>
-    ///     The entry points of the UniSDK that the game itself uses (see the import table of the game).
-    /// </summary>
-    public static class UniSdkInitExport
-    {
-        /// <summary>The pre initialization of the SDK (configuration and context).</summary>
-        public const string PreInit = "?preInit@SdkMgr@NtUniSDK@@SAXPEBD@Z";
-
-        /// <summary>The command line the SDK reads.</summary>
-        public const string SetCommandLine = "?setCmdLineParameter@SdkMgr@NtUniSDK@@SAXPEBD@Z";
-
-        /// <summary>The initialization of the SDK (configuration and context).</summary>
-        public const string Init = "?init@SDKManager@NtUniSDK@@SA_NPEBD0@Z";
-
-        /// <summary>The interface the game uses (the virtual table holds the login).</summary>
-        public const string GetInstance = "?getInst@SdkMgr@NtUniSDK@@SAPEAVINtUniSdkGamerInterface@2@XZ";
-
-        /// <summary>The slot of the initialization in the virtual table of the interface.</summary>
-        public const int InitSlot = 0x78;
-
-        /// <summary>The slot of the login in the virtual table of the interface.</summary>
-        public const int LoginSlot = 0x80;
-
-        /// <summary>
-        ///     The slot the plain C entry <c>__EP_Login</c> uses (the account login, in contrast to
-        ///     <see cref="LoginSlot" /> which is the Steam integration).
-        /// </summary>
-        public const int AccountLoginSlot = 0x58;
-
-        /// <summary>
-        ///     The properties the login expects (the names are the ones the SDK uses internally).
-        /// </summary>
-        public static readonly string[] UniSdkLoginProperties =
-        [
-            "enable_2fa",
-            "support_2FA",
-            "is_cloud_game",
-            "login_start",
-            "login_start_base",
-            "height",
-            "width",
-            "screen_resoultion",
-            "screen_size",
-            "screen",
-            "memory_total_format"
-        ];
-    }
+    public const string SessionFileName = "session.dat";
 
     /// <summary>
     ///     The directory the plugin keeps its own files in.
@@ -305,22 +278,23 @@ public static class NeteaseGamesSession
     public static string SessionPath => Path.Combine(SessionDirectory, SessionFileName);
 
     /// <summary>
-    ///     Applies the stored login state to the environment of this process (the game inherits it).
+    ///     Applies the stored login state to the environment of this process (the game inherits it) and
+    ///     returns a handle that restores the previous values.
+    ///     <para>
+    ///         The tokens are a credential, so they must not stay in the long living host process: the caller
+    ///         <b>must</b> dispose the returned handle right after the game was started.
+    ///     </para>
     /// </summary>
-    /// <returns>Whether a complete login state was applied.</returns>
-    public static bool ApplyStoredSession()
+    /// <returns>A handle that restores the environment, or <c>null</c> when no state was applied.</returns>
+    public static IDisposable? ApplyStoredSession()
     {
         NeteaseGamesLoginState? state = NeteaseGamesLoginState.TryRead(SessionPath);
-        if (state is null)
+        if (state is null || !state.IsComplete)
         {
-            return false;
+            return null;
         }
 
-        if (!state.IsComplete)
-        {
-            return false;
-        }
-
+        Dictionary<string, string?> restore = new(StringComparer.Ordinal);
         foreach ((string name, string? value) in state.BuildEnvironment())
         {
             if (value is null)
@@ -328,9 +302,40 @@ public static class NeteaseGamesSession
                 continue;
             }
 
-            Environment.SetEnvironmentVariable(name, value);
+            restore[name] = Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.Process);
+            Environment.SetEnvironmentVariable(name, value, EnvironmentVariableTarget.Process);
         }
 
-        return true;
+        return new EnvironmentRestore(restore);
+    }
+
+    /// <summary>
+    ///     Restores the process environment variables that were set by <see cref="ApplyStoredSession" />.
+    /// </summary>
+    private sealed class EnvironmentRestore(Dictionary<string, string?> previous) : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            foreach ((string name, string? value) in previous)
+            {
+                try
+                {
+                    Environment.SetEnvironmentVariable(name, value, EnvironmentVariableTarget.Process);
+                }
+                catch (Exception ex) when (ex is System.Security.SecurityException or ArgumentException)
+                {
+                    // Nothing sensible can be done here; the process is about to hand over to the game anyway.
+                }
+            }
+
+            _disposed = true;
+        }
     }
 }

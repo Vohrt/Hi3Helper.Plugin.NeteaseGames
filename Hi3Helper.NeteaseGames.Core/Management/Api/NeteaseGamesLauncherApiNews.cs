@@ -20,79 +20,71 @@ namespace Hi3Helper.NeteaseGames.Core.Management.Api;
 /// <summary>
 ///     Provides the news feed and the banner carousel of a NetEase game.
 ///     <para>
-///         The news entries are read from the notice cache the game writes into Documents\notice\*.json
-///         (the official launcher is not required for this), the banner carousel is built from the images of
-///         the same folder and the remote notice manifest (release_launcher_notice_info.xml) tells which
-///         banners are currently active.
+///         The remote notice manifest (<c>OB_release_launcher_notice_info.xml</c>) is the source of truth: it
+///         lists the announcements and activities that are currently published, with their title, dates and
+///         notice id. The notice text is fetched from the per-notice JSON on demand. The game also caches the
+///         notices it pulled into <c>Documents\notice\*.json</c>; that cache is used as a fallback so the page
+///         is not empty while offline.
 ///     </para>
 /// </summary>
 [GeneratedComClass]
 public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
 {
     private readonly Func<string?> _gamePathProvider;
+    private readonly HttpClient _httpClient;
 
     private List<NewsItem> _newsItems = [];
     private List<CarouselItem> _carouselItems = [];
 
+    /// <summary>
+    ///     Creates the news API.
+    /// </summary>
+    /// <param name="gamePathProvider">A callback that returns the installation path, or null.</param>
     public NeteaseGamesLauncherApiNews(Func<string?> gamePathProvider)
     {
         _gamePathProvider = gamePathProvider;
+        _httpClient = NeteaseGamesHttp.CreateClient(TimeSpan.FromSeconds(20));
     }
 
-    private sealed record NewsItem(string Title, string Description, string Url, string Date, LauncherNewsEntryType Type);
+    internal sealed record NewsItem(string Title, string Description, string Url, string Date, LauncherNewsEntryType Type);
 
     private sealed record CarouselItem(string Description, string ImagePath, string ClickUrl);
 
-    [field: AllowNull]
-    [field: MaybeNull]
+    /// <inheritdoc/>
     protected override HttpClient ApiResponseHttpClient
     {
-        get
-        {
-            if (field is not null)
-            {
-                return field;
-            }
-
-            PluginHttpClientBuilder builder = new PluginHttpClientBuilder()
-                .SetAllowedDecompression(System.Net.DecompressionMethods.All)
-                .AllowRedirections()
-                .AllowUntrustedCert()
-                .AllowCookies()
-                .SetUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) CollapsePlugin/1.0");
-
-            return field = builder.Create();
-        }
-        set;
+        get => _httpClient;
+        set { }
     }
 
     /// <inheritdoc/>
     protected override async Task<int> InitAsync(CancellationToken token)
     {
-        _newsItems = LoadNews();
-        _carouselItems = LoadCarousel();
-
+        List<NewsItem> remote = [];
         try
         {
             Uri uri = NeteaseGamesEndpoints.GetManifestUri(
                 NeteaseGamesEndpoints.PatchListBaseUrl,
                 NeteaseGamesEndpoints.NoticeListName);
-            string xml = await ApiResponseHttpClient.GetStringAsync(uri, token).ConfigureAwait(false);
-            XDocument document = XDocument.Parse(xml);
-            int banners = document.Descendants("BannerItem").Count();
+            string xml = await _httpClient.GetStringAsync(uri, token).ConfigureAwait(false);
+            remote = ParseNoticeManifest(xml);
             SharedStatic.InstanceLogger?.LogInformation(
-                "[NeteaseGamesNews] Loaded {News} news entries, {Carousel} carousel entries, {Banners} remote banners",
-                _newsItems.Count, _carouselItems.Count, banners);
+                "[NeteaseGamesNews] Loaded {Count} remote notice entries", remote.Count);
         }
         catch (OperationCanceledException)
         {
             return 0;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Xml.XmlException)
         {
-            SharedStatic.InstanceLogger?.LogWarning("[NeteaseGamesNews] Failed to fetch the remote notice manifest: {Msg}", ex.Message);
+            SharedStatic.InstanceLogger?.LogWarning(
+                "[NeteaseGamesNews] Failed to fetch the remote notice manifest: {Msg}", ex.Message);
         }
 
+        List<NewsItem> cached = LoadCachedNews();
+
+        _newsItems = remote.Count > 0 ? remote : cached;
+        _carouselItems = LoadCarousel(cached);
         return 0;
     }
 
@@ -157,7 +149,89 @@ public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
         isAllocated = false;
     }
 
-    private List<NewsItem> LoadNews()
+    /// <summary>
+    ///     Parses the remote notice manifest.
+    ///     <para>
+    ///         The document has <c>ActivityInfo</c> and <c>AnnounceInfo</c> sections; every item carries a
+    ///         localized title token (<c>one:&lt;notice id&gt;</c>), a per-language URL and a validity window.
+    ///     </para>
+    /// </summary>
+    /// <param name="xml">The document.</param>
+    internal static List<NewsItem> ParseNoticeManifest(string xml)
+    {
+        List<NewsItem> items = [];
+        if (string.IsNullOrWhiteSpace(xml))
+        {
+            return items;
+        }
+
+        XDocument document = XDocument.Parse(xml);
+        XElement? root = document.Root;
+        if (root is null)
+        {
+            return items;
+        }
+
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        ReadSection(root.Element("AnnounceInfo"), LauncherNewsEntryType.Notice, now, items);
+        ReadSection(root.Element("ActivityInfo"), LauncherNewsEntryType.Event, now, items);
+        return items;
+    }
+
+    private static void ReadSection(XElement? section, LauncherNewsEntryType type, long now, List<NewsItem> items)
+    {
+        if (section is null)
+        {
+            return;
+        }
+
+        foreach (XElement item in section.Elements())
+        {
+            long end = ReadTimestamp(item.Element("end_timestamp")?.Value);
+            if (end > 0 && end < now)
+            {
+                // The notice is over.
+                continue;
+            }
+
+            long begin = ReadTimestamp(item.Element("begin_timestamp")?.Value);
+            if (begin > 0 && begin > now)
+            {
+                // The notice is not published yet.
+                continue;
+            }
+
+            string? url = item.Elements("url")
+                .FirstOrDefault(u => string.Equals(u.Attribute("title")?.Value, "zh_CN", StringComparison.OrdinalIgnoreCase))
+                ?.Value
+                ?? item.Element("url")?.Value;
+
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                continue;
+            }
+
+            string title = item.Attribute("title")?.Value ?? string.Empty;
+            items.Add(new NewsItem(FormatTitle(title), string.Empty, url.Trim(), string.Empty, type));
+        }
+    }
+
+    /// <summary>
+    ///     Turns a notice id token (<c>one:186</c>) into a readable title.
+    /// </summary>
+    private static string FormatTitle(string token)
+    {
+        int separator = token.IndexOf(':');
+        return separator >= 0 && separator + 1 < token.Length ? $"公告 #{token[(separator + 1)..]}" : token;
+    }
+
+    private static long ReadTimestamp(string? value)
+        => long.TryParse(value, out long parsed) ? parsed : 0;
+
+    /// <summary>
+    ///     Reads the notice cache the game writes into <c>Documents\notice\*.json</c>.
+    /// </summary>
+    private List<NewsItem> LoadCachedNews()
     {
         List<NewsItem> items = [];
         string noticeDirectory = GetNoticeDirectory();
@@ -194,7 +268,7 @@ public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
                     date,
                     LauncherNewsEntryType.Notice));
             }
-            catch (Exception)
+            catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
             {
                 // A broken notice file must not break the whole feed.
             }
@@ -204,23 +278,82 @@ public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
         return items;
     }
 
-    private List<CarouselItem> LoadCarousel()
+    /// <summary>
+    ///     Enumerates the image URLs the notice manifest publishes (candidate launcher backgrounds).
+    /// </summary>
+    /// <param name="xml">The notice manifest.</param>
+    public static IEnumerable<string> EnumerateNoticeImageUrls(string xml)
+    {
+        if (string.IsNullOrWhiteSpace(xml))
+        {
+            yield break;
+        }
+
+        XDocument document;
+        try
+        {
+            document = XDocument.Parse(xml);
+        }
+        catch (System.Xml.XmlException)
+        {
+            yield break;
+        }
+
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+        foreach (XElement item in document.Descendants())
+        {
+            string? url = item.Element("img")?.Value
+                       ?? item.Attribute("img")?.Value
+                       ?? item.Element("image")?.Value;
+
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                continue;
+            }
+
+            url = url.Trim();
+            if (!url.StartsWith("http", StringComparison.OrdinalIgnoreCase) || !seen.Add(url))
+            {
+                continue;
+            }
+
+            yield return url;
+        }
+    }
+    private List<CarouselItem> LoadCarousel(List<NewsItem> fallback)
     {
         List<CarouselItem> items = [];
         string noticeDirectory = GetNoticeDirectory();
-        if (noticeDirectory.Length == 0)
+        if (noticeDirectory.Length > 0)
+        {
+            foreach ((DateTime _, string path) in EnumerateImages(noticeDirectory))
+            {
+                if (items.Count >= 5)
+                {
+                    break;
+                }
+
+                items.Add(new CarouselItem(string.Empty, path, NeteaseGamesEndpoints.HomePageUrl));
+            }
+        }
+
+        if (items.Count > 0)
         {
             return items;
         }
 
-        foreach ((DateTime _, string path) in EnumerateImages(noticeDirectory))
+        // No local artwork yet: fall back to the published notices so the strip is not empty.
+        foreach (NewsItem news in fallback)
         {
             if (items.Count >= 5)
             {
                 break;
             }
 
-            items.Add(new CarouselItem(string.Empty, path, "https://sea.163.com/news/"));
+            if (news.Url.Length > 0)
+            {
+                items.Add(new CarouselItem(news.Title, string.Empty, news.Url));
+            }
         }
 
         return items;
@@ -253,7 +386,7 @@ public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
             {
                 images.Add((new FileInfo(file).LastWriteTimeUtc, file));
             }
-            catch (Exception)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 // Ignore unreadable files.
             }
@@ -267,4 +400,11 @@ public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
         => element.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() ?? string.Empty
             : string.Empty;
+
+    /// <inheritdoc/>
+    public override void Dispose()
+    {
+        _httpClient.Dispose();
+        base.Dispose();
+    }
 }

@@ -18,41 +18,40 @@ namespace Hi3Helper.NeteaseGames.Core.Management;
 ///     <para>
 ///         Everything that the launcher UI asks for synchronously (installed? version?) is answered from the
 ///         local files only, so the plugin never blocks on the network. The remote version is fetched during
-///         <see cref="InitAsync" />, which is the only hook the host awaits during startup.
+///         <see cref="InitAsync" />, which is the only hook the host awaits during startup - so the probe is
+///         bounded and never keeps the launcher waiting for a slow network.
 ///     </para>
 /// </summary>
 [GeneratedComClass]
 public partial class NeteaseGamesGameManager : GameManagerBase
 {
+    /// <summary>
+    ///     The maximum time the startup probe may take. The host awaits <see cref="InitAsync" /> while the
+    ///     region loads, so a hanging endpoint must not be able to delay it.
+    /// </summary>
+    public static readonly TimeSpan StartupProbeTimeout = TimeSpan.FromSeconds(5);
+
     private readonly object _syncRoot = new();
+    private readonly HttpClient _httpClient;
     private NeteaseGamesMiniPackManifest? _remoteManifest;
     private NeteaseGamesPatchManifest? _remotePatchManifest;
-    private NeteaseGamesDelta? _delta;
     private long _remotePackageVersion;
     private bool _remoteProbed;
     private bool _hasEngineUpdate;
 
-    [field: AllowNull]
-    [field: MaybeNull]
+    /// <summary>
+    ///     Creates a game manager.
+    /// </summary>
+    public NeteaseGamesGameManager()
+    {
+        _httpClient = NeteaseGamesHttp.CreateClient();
+    }
+
+    /// <inheritdoc/>
     protected override HttpClient ApiResponseHttpClient
     {
-        get
-        {
-            if (field is not null)
-            {
-                return field;
-            }
-
-            PluginHttpClientBuilder builder = new PluginHttpClientBuilder()
-                .SetAllowedDecompression(System.Net.DecompressionMethods.All)
-                .AllowRedirections()
-                .AllowUntrustedCert()
-                .AllowCookies()
-                .SetUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) CollapsePlugin/1.0");
-
-            return field = builder.Create();
-        }
-        set;
+        get => _httpClient;
+        set { }
     }
 
     /// <summary>
@@ -111,20 +110,6 @@ public partial class NeteaseGamesGameManager : GameManagerBase
         }
     }
 
-    /// <summary>
-    ///     The difference between the local and the remote file list, when it could be computed.
-    /// </summary>
-    public NeteaseGamesDelta? Delta
-    {
-        get
-        {
-            lock (_syncRoot)
-            {
-                return _delta;
-            }
-        }
-    }
-
     /// <inheritdoc/>
     protected override bool IsInstalled
     {
@@ -161,9 +146,21 @@ public partial class NeteaseGamesGameManager : GameManagerBase
     /// <inheritdoc/>
     protected override async Task<int> InitAsync(CancellationToken token)
     {
-        await ProbeRemoteVersionAsync(token).ConfigureAwait(false);
-        await ProbeDeltaAsync(token).ConfigureAwait(false);
+        await InitAsyncInternal(token).ConfigureAwait(false);
         return 0;
+    }
+
+    /// <summary>
+    ///     Runs the bounded startup probe on behalf of the preset (whose own <c>InitAsync</c> is the hook the
+    ///     host awaits).
+    /// </summary>
+    /// <param name="token">Cancel token.</param>
+    public async Task InitAsyncInternal(CancellationToken token)
+    {
+        // Bounded: the host awaits this while the launcher UI loads.
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(StartupProbeTimeout);
+        await ProbeRemoteVersionAsync(timeout.Token).ConfigureAwait(false);
     }
 
     /// <inheritdoc cref="GameManagerBase.FindExistingInstallPathAsyncInner"/>
@@ -183,6 +180,7 @@ public partial class NeteaseGamesGameManager : GameManagerBase
     protected override void SetGamePathInner(string gamePath)
     {
         CurrentGameInstallPath = gamePath;
+        NeteaseGamesLocalState.InvalidatePatchListCache(gamePath);
         EnsureLocalVersionProbed();
     }
 
@@ -240,8 +238,7 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             return;
         }
 
-        // The engine version of the installation is the one of the engine build, the latest one is the one
-        // the launcher wrote after it prepared the new engine.
+        // The engine version of the installation is the one of the engine build.
         string local = state.EngineVersion;
         if (string.IsNullOrEmpty(local))
         {
@@ -249,7 +246,8 @@ public partial class NeteaseGamesGameManager : GameManagerBase
         }
 
         bool update = !string.IsNullOrEmpty(local) &&
-                      !string.Equals(local, manifest.CurrentVersion, StringComparison.Ordinal);
+                      !string.Equals(local, manifest.CurrentVersion, StringComparison.Ordinal) &&
+                      !string.Equals(local, manifest.EngineVersion, StringComparison.Ordinal);
 
         lock (_syncRoot)
         {
@@ -259,6 +257,7 @@ public partial class NeteaseGamesGameManager : GameManagerBase
 
     /// <summary>
     ///     Fetches the remote version information (mini-pack manifest + remote patch manifest).
+    ///     Safe to call more than once: a successful probe is not repeated.
     /// </summary>
     /// <param name="token">Cancel token.</param>
     public async Task ProbeRemoteVersionAsync(CancellationToken token)
@@ -269,14 +268,12 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             {
                 return;
             }
-
-            _remoteProbed = true;
         }
 
         try
         {
             Uri manifestUri = NeteaseGamesEndpoints.GetMiniPackListUri(NeteaseGamesEndpoints.PatchListBaseUrl);
-            byte[] payload = await ApiResponseHttpClient.GetByteArrayAsync(manifestUri, token).ConfigureAwait(false);
+            byte[] payload = await _httpClient.GetByteArrayAsync(manifestUri, token).ConfigureAwait(false);
             NeteaseGamesMiniPackManifest manifest = NeteaseGamesMiniPackManifest.Parse(payload);
 
             lock (_syncRoot)
@@ -292,25 +289,16 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             {
                 UpdateEngineState(NeteaseGamesLocalState.Read(CurrentGameInstallPath));
             }
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
-        catch (Exception ex)
-        {
-            SharedStatic.InstanceLogger?.LogWarning("[NeteaseGames] Failed to fetch remote mini pack manifest: {Msg}", ex.Message);
-        }
 
-        // The remote patch manifest carries the authoritative package version.
-        try
-        {
             long remotePackageVersion = await FetchRemotePackageVersionAsync(token).ConfigureAwait(false);
             if (remotePackageVersion > 0)
             {
                 lock (_syncRoot)
                 {
                     _remotePackageVersion = remotePackageVersion;
+                    // Only mark the probe as complete once the authoritative version is known: a timeout or
+                    // a transient failure must be retried the next time the host asks.
+                    _remoteProbed = true;
                 }
 
                 ApiGameVersion = new GameVersion(0, 0, (int)remotePackageVersion, 0);
@@ -319,13 +307,27 @@ public partial class NeteaseGamesGameManager : GameManagerBase
         }
         catch (OperationCanceledException)
         {
-            return;
+            SharedStatic.InstanceLogger?.LogInformation("[NeteaseGames] The remote version probe timed out");
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is HttpRequestException or IOException or FormatException)
         {
-            SharedStatic.InstanceLogger?.LogWarning("[NeteaseGames] Failed to fetch remote patch manifest: {Msg}", ex.Message);
+            SharedStatic.InstanceLogger?.LogWarning(
+                "[NeteaseGames] Failed to fetch the remote manifests: {Msg}", ex.Message);
         }
     }
+
+    /// <summary>
+    ///     Fetches the engine payload file list of the announced mini pack.
+    /// </summary>
+    /// <param name="looseFileParentDir">The payload directory.</param>
+    /// <param name="token">Cancel token.</param>
+    public Task<System.Collections.Generic.IReadOnlyList<NeteaseGamesEngineFile>> FetchEnginePayloadFileListAsync(
+        string looseFileParentDir, CancellationToken token)
+        => NeteaseGamesEnginePatcher.FetchFileListAsync(
+            _httpClient,
+            looseFileParentDir,
+            NeteaseGamesContentEndpoints.GetEnginePayloadHosts(),
+            token);
 
     private async Task<long> FetchRemotePackageVersionAsync(CancellationToken token)
     {
@@ -333,7 +335,7 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             NeteaseGamesEndpoints.PatchListBaseUrl,
             NeteaseGamesEndpoints.PatchMd5ListName);
 
-        byte[] raw = await ApiResponseHttpClient.GetByteArrayAsync(uri, token).ConfigureAwait(false);
+        byte[] raw = await _httpClient.GetByteArrayAsync(uri, token).ConfigureAwait(false);
         byte[] plain = NeteaseGamesCrypto.IsHexEnvelope(raw)
             ? NeteaseGamesCrypto.DecryptHexEnvelope(raw)
             : raw;
@@ -369,54 +371,6 @@ public partial class NeteaseGamesGameManager : GameManagerBase
     }
 
     /// <summary>
-    ///     Downloads the remote file list from the content host and compares it with the local one.
-    /// </summary>
-    /// <param name="token">Cancel token.</param>
-    public async Task ProbeDeltaAsync(CancellationToken token)
-    {
-        NeteaseGamesPatchManifest? manifest = RemotePatchManifest;
-        if (manifest is null || string.IsNullOrEmpty(manifest.BaseVersion))
-        {
-            return;
-        }
-
-        string? installPath = CurrentGameInstallPath;
-        NeteaseGamesPatchList? local = string.IsNullOrEmpty(installPath)
-            ? null
-            : NeteaseGamesLocalState.ReadPatchList(installPath);
-        if (local is null)
-        {
-            return;
-        }
-
-        try
-        {
-            NeteaseGamesPatchList remote = await FetchRemotePatchListAsync(manifest.BaseVersion, token)
-                .ConfigureAwait(false);
-
-            NeteaseGamesDelta delta = NeteaseGamesDelta.Compute(local, remote);
-            lock (_syncRoot)
-            {
-                _delta = delta;
-            }
-
-            SharedStatic.InstanceLogger?.LogInformation(
-                "[NeteaseGames] Delta: +{Added} ~{Changed} -{Removed} loose={Loose} MB packages={Packages} ({PackageMB} MB)",
-                delta.AddedFiles, delta.ChangedFiles, delta.RemovedFiles,
-                delta.LooseDownloadSize / 1024 / 1024, delta.RequiredPackages.Count,
-                delta.PackageDownloadSize / 1024 / 1024);
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
-        catch (Exception ex)
-        {
-            SharedStatic.InstanceLogger?.LogWarning("[NeteaseGames] Failed to compute the delta: {Msg}", ex.Message);
-        }
-    }
-
-    /// <summary>
     ///     Downloads the remote file list (the variant that contains the files of the mpk shards).
     /// </summary>
     /// <param name="version">The base version of the patch.</param>
@@ -428,43 +382,12 @@ public partial class NeteaseGamesGameManager : GameManagerBase
         string url = NeteaseGamesContentEndpoints.GetContentUrl(
             version, null, NeteaseGamesContentEndpoints.PatchListMpkFileName, DateTimeOffset.UtcNow);
 
-        byte[] raw = await ApiResponseHttpClient.GetByteArrayAsync(new Uri(url), token).ConfigureAwait(false);
+        byte[] raw = await _httpClient.GetByteArrayAsync(new Uri(url), token).ConfigureAwait(false);
         byte[] plain = NeteaseGamesCrypto.IsHexEnvelope(raw)
             ? NeteaseGamesCrypto.DecryptHexEnvelope(raw)
             : raw;
 
         return NeteaseGamesPatchList.Parse(plain);
-    }
-
-    /// <summary>
-    ///     Reads the package version from the JSON part of the patch manifest
-    ///     (<c>normal.latest_pkgversion</c>).
-    /// </summary>
-    private static long ParsePackageVersionFromJson(string text)
-    {
-        int start = text.IndexOf('{');
-        if (start < 0)
-        {
-            return 0;
-        }
-
-        try
-        {
-            using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(text[start..]);
-            if (document.RootElement.TryGetProperty("normal", out System.Text.Json.JsonElement normal) &&
-                normal.TryGetProperty("latest_pkgversion", out System.Text.Json.JsonElement latest) &&
-                latest.ValueKind == System.Text.Json.JsonValueKind.Number &&
-                latest.TryGetInt64(out long version))
-            {
-                return version;
-            }
-        }
-        catch (System.Text.Json.JsonException)
-        {
-            return 0;
-        }
-
-        return 0;
     }
 
     /// <summary>
@@ -482,18 +405,24 @@ public partial class NeteaseGamesGameManager : GameManagerBase
                 {
                     total += new FileInfo(file).Length;
                 }
-                catch (Exception)
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
                     // Skip files that vanished while scanning.
                 }
             }
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // Return whatever we have counted so far.
         }
 
         return total;
     }
-}
 
+    /// <inheritdoc/>
+    public override void Dispose()
+    {
+        _httpClient.Dispose();
+        base.Dispose();
+    }
+}

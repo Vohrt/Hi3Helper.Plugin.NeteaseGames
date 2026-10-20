@@ -13,168 +13,199 @@ namespace Hi3Helper.NeteaseGames.Core;
 /// <summary>
 ///     Applies a patch to an installation of the game.
 ///     <para>
-///         The official launcher replaces the changed patch packages and the package indexes in the patch
-///         directory and then writes the new package version. The game reads the packages through the
-///         indexes, so the content of a package never has to be unpacked.
+///         The official launcher replaces the changed patch packages, their package indexes and the loose
+///         files that are excluded from the packages, and only then writes the new package version. The game
+///         reads packages <b>through</b> the indexes, so an outdated index next to a replaced package makes
+///         the game read misaligned data - the write order below matters:
+///         <list type="number">
+///             <item>download every changed object into the staging directory,</item>
+///             <item>move the packages into place,</item>
+///             <item>move the package indexes and the loose files into place,</item>
+///             <item>write the package version (the commit point of the whole operation).</item>
+///         </list>
+///         The version file is never written when any object failed, so an interrupted or partial update can
+///         never be mistaken for a finished one.
 ///     </para>
 /// </summary>
 public static class NeteaseGamesUpdateApplier
 {
     /// <summary>
-    ///     Downloads the changed packages and indexes and installs them into the patch directory.
+    ///     Applies a patch to an installation.
     /// </summary>
     /// <param name="httpClient">The client used for the content requests.</param>
     /// <param name="gameDirectory">The root of the installation.</param>
-    /// <param name="local">The patch list of the local installation, or <c>null</c> for a fresh installation.</param>
-    /// <param name="remote">The patch list of the remote installation.</param>
-    /// <param name="baseVersion">The base version the content is stored under.</param>
-    /// <param name="packageVersion">The package version the installation is updated to.</param>
-    /// <param name="progress">An optional progress callback.</param>
+    /// <param name="plan">The plan that lists every object that has to be downloaded.</param>
+    /// <param name="downloader">The downloader that performs the transfers.</param>
+    /// <param name="progress">Reports the number of bytes that are already on disk.</param>
     /// <param name="token">Cancel token.</param>
-    /// <returns><c>true</c> when every package was installed.</returns>
-    public static async Task<bool> ApplyAsync(
+    /// <returns>The result of the operation.</returns>
+    public static async Task<NeteaseGamesApplyResult> ApplyAsync(
         HttpClient httpClient,
         string gameDirectory,
-        NeteaseGamesPatchList? local,
-        NeteaseGamesPatchList remote,
-        string baseVersion,
-        int packageVersion,
+        NeteaseGamesDownloadPlan plan,
+        NeteaseGamesDownloader downloader,
         Action<long>? progress,
         CancellationToken token)
     {
+        ArgumentNullException.ThrowIfNull(httpClient);
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(downloader);
+        ArgumentException.ThrowIfNullOrEmpty(gameDirectory);
+
         string patchDirectory = Path.Combine(gameDirectory, NeteaseGamesPaths.PatchDirectoryRelativePath);
-        string staging = Path.Combine(patchDirectory, "staging");
-        Directory.CreateDirectory(staging);
+        Directory.CreateDirectory(patchDirectory);
 
-        NeteaseGamesDownloader downloader = new(httpClient);
+        SharedStatic.InstanceLogger?.LogInformation(
+            "[NeteaseGames] Applying patch: {Packages} packages, {Indexes} indexes, {Loose} loose files, {Size} bytes",
+            plan.PackageCount, plan.IndexCount, plan.LooseCount, plan.TotalSize);
 
-        List<(string Name, string Section, long Size)> changed = [];
-        foreach ((string name, NeteaseGamesPackageEntry package) in remote.Packages)
+        // Download everything first. A failure here leaves the installation untouched.
+        foreach (NeteaseGamesDownloadItem item in plan.Items)
         {
-            if (local is not null &&
-                local.Packages.TryGetValue(name, out NeteaseGamesPackageEntry? localPackage) &&
-                localPackage is not null &&
-                HashesEqual(localPackage.Hashes, package.Hashes))
+            token.ThrowIfCancellationRequested();
+
+            long start = plan.DownloadedSize;
+            bool ok = await downloader
+                .DownloadAsync(item, bytes => progress?.Invoke(start + bytes), token)
+                .ConfigureAwait(false);
+
+            if (!ok)
+            {
+                SharedStatic.InstanceLogger?.LogError(
+                    "[NeteaseGames] Could not download '{Path}', the patch is cancelled", item.RelativePath);
+                return NeteaseGamesApplyResult.DownloadFailed(item.RelativePath);
+            }
+
+            plan.ReportDownloaded(item.ExpectedSize);
+        }
+
+        // Packages first, then the indexes that describe them, then the loose files.
+        foreach (NeteaseGamesDownloadItem item in plan.Items)
+        {
+            if (item.Kind != NeteaseGamesDownloadKind.Package)
             {
                 continue;
             }
 
-            changed.Add((name, package.Section, package.TotalSize));
-        }
-
-        long total = 0;
-        foreach ((_, _, long size) in changed)
-        {
-            total += size;
-        }
-
-        SharedStatic.InstanceLogger?.LogInformation(
-            "[NeteaseGames] Applying patch: {Count} packages ({Size} bytes), base {Base}, package version {Version}",
-            changed.Count, total, baseVersion, packageVersion);
-
-        long done = 0;
-        foreach ((string name, string section, long size) in changed)
-        {
-            token.ThrowIfCancellationRequested();
-
-            string relative = string.IsNullOrEmpty(section)
-                ? $"{baseVersion}/{name}"
-                : $"{baseVersion}/{section}/{name}";
-
-            NeteaseGamesDownloadItem item = new()
+            try
             {
-                RelativePath = relative,
-                ExpectedSize = size,
-                TargetPath = Path.Combine(staging, name)
-            };
-
-            long start = done;
-            bool ok = await downloader.DownloadAsync(
-                item,
-                bytes => progress?.Invoke(start + bytes),
-                token).ConfigureAwait(false);
-
-            if (!ok)
-            {
-                SharedStatic.InstanceLogger?.LogWarning(
-                    "[NeteaseGames] Could not download the package '{Name}'", name);
-                return false;
+                MoveIntoPlace(item, patchDirectory);
             }
-
-            // The package replaces the old one inside the patch directory.
-            string target = Path.Combine(patchDirectory, name);
-            File.Move(item.TargetPath, target, overwrite: true);
-            done += size;
-        }
-
-        // The files that are not part of a package (the "mpkexclude" list) are delivered one by one. Their
-        // location on the content host is not known yet, so they are reported instead of being ignored.
-        int loose = CountChangedLooseFiles(local, remote);
-        if (loose > 0)
-        {
-            SharedStatic.InstanceLogger?.LogWarning(
-                "[NeteaseGames] {Count} loose files changed but their download location is not known yet",
-                loose);
-        }
-
-        if (packageVersion > 0)
-        {
-            string versionFile = Path.Combine(patchDirectory, NeteaseGamesPaths.PackageVersionFileName);
-            await File.WriteAllTextAsync(versionFile, packageVersion.ToString(), token).ConfigureAwait(false);
-        }
-
-        try
-        {
-            if (Directory.Exists(staging))
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                Directory.Delete(staging, recursive: true);
+                SharedStatic.InstanceLogger?.LogError(
+                    "[NeteaseGames] Could not replace the package '{Path}': {Msg}", item.RelativePath, ex.Message);
+                return NeteaseGamesApplyResult.ApplyFailed(item.RelativePath);
             }
         }
-        catch (Exception)
+
+        foreach (NeteaseGamesDownloadItem item in plan.Items)
         {
-            // A leftover staging directory is not fatal.
+            if (item.Kind != NeteaseGamesDownloadKind.Index)
+            {
+                continue;
+            }
+
+            try
+            {
+                MoveIntoPlace(item, patchDirectory);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                SharedStatic.InstanceLogger?.LogError(
+                    "[NeteaseGames] Could not replace the index '{Path}': {Msg}", item.RelativePath, ex.Message);
+                return NeteaseGamesApplyResult.ApplyFailed(item.RelativePath);
+            }
         }
 
-        return true;
+        foreach (NeteaseGamesDownloadItem item in plan.Items)
+        {
+            if (item.Kind != NeteaseGamesDownloadKind.LooseFile)
+            {
+                continue;
+            }
+
+            try
+            {
+                MoveIntoPlace(item, gameDirectory);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                SharedStatic.InstanceLogger?.LogError(
+                    "[NeteaseGames] Could not write the file '{Path}': {Msg}", item.RelativePath, ex.Message);
+                return NeteaseGamesApplyResult.ApplyFailed(item.RelativePath);
+            }
+        }
+
+        // The version file is the commit point: written only when every object is in place.
+        if (plan.PackageVersion > 0)
+        {
+            try
+            {
+                WriteAtomic(Path.Combine(patchDirectory, NeteaseGamesPaths.PackageVersionFileName),
+                    plan.PackageVersion.ToString());
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                SharedStatic.InstanceLogger?.LogError(
+                    "[NeteaseGames] Could not write the package version: {Msg}", ex.Message);
+                return NeteaseGamesApplyResult.ApplyFailed(NeteaseGamesPaths.PackageVersionFileName);
+            }
+        }
+
+        plan.CleanStaging();
+        SharedStatic.InstanceLogger?.LogInformation("[NeteaseGames] The patch was applied");
+        return NeteaseGamesApplyResult.Success;
     }
 
     /// <summary>
-    ///     Counts the files that are not part of a package and whose content changed.
+    ///     Moves a staged object over its target, creating the parent directory first.
     /// </summary>
-    private static int CountChangedLooseFiles(NeteaseGamesPatchList? local, NeteaseGamesPatchList remote)
+    /// <param name="item">The plan item.</param>
+    /// <param name="root">The root the target path is resolved against (the patch directory or the game root).</param>
+    private static void MoveIntoPlace(NeteaseGamesDownloadItem item, string root)
     {
-        if (local is null)
+        string target = item.ResolveTargetPath(root);
+        string? directory = Path.GetDirectoryName(target);
+        if (!string.IsNullOrEmpty(directory))
         {
-            return 0;
+            Directory.CreateDirectory(directory);
         }
 
-        int count = 0;
-        foreach ((string path, NeteaseGamesFileEntry entry) in remote.LooseFiles)
+        if (!File.Exists(item.StagedPath))
         {
-            if (!local.LooseFiles.TryGetValue(path, out NeteaseGamesFileEntry localEntry) || localEntry.Hash != entry.Hash)
-            {
-                count++;
-            }
+            throw new FileNotFoundException($"The staged file '{item.StagedPath}' is missing.", item.StagedPath);
         }
 
-        return count;
+        File.Move(item.StagedPath, target, overwrite: true);
     }
 
-    private static bool HashesEqual(List<ulong> left, List<ulong> right)
+    /// <summary>
+    ///     Writes a small text file through a temporary file so that a crash cannot leave it half written.
+    /// </summary>
+    private static void WriteAtomic(string path, string content)
     {
-        if (left.Count != right.Count)
-        {
-            return false;
-        }
-
-        for (int i = 0; i < left.Count; i++)
-        {
-            if (left[i] != right[i])
-            {
-                return false;
-            }
-        }
-
-        return true;
+        string temporary = path + ".tmp";
+        File.WriteAllText(temporary, content);
+        File.Move(temporary, path, overwrite: true);
     }
+}
+
+/// <summary>The result of an <see cref="NeteaseGamesUpdateApplier.ApplyAsync" /> call.</summary>
+public readonly record struct NeteaseGamesApplyResult(bool IsSuccess, string? FailedPath)
+{
+    /// <summary>Whether the patch was applied completely.</summary>
+    public bool IsSuccess { get; } = IsSuccess;
+
+    /// <summary>The object that failed, or <c>null</c> on success.</summary>
+    public string? FailedPath { get; } = FailedPath;
+
+    /// <summary>A successful result.</summary>
+    public static NeteaseGamesApplyResult Success => new(true, null);
+
+    /// <summary>A result that reports a failed download.</summary>
+    public static NeteaseGamesApplyResult DownloadFailed(string path) => new(false, path);
+
+    /// <summary>A result that reports a failed file replacement.</summary>
+    public static NeteaseGamesApplyResult ApplyFailed(string path) => new(false, path);
 }

@@ -18,82 +18,68 @@ namespace Hi3Helper.NeteaseGames.Core.Management;
 ///         NetEase distributes its payload in two shapes:
 ///         <list type="number">
 ///             <item>
-///                 <b>Mini pack</b> - the remote manifest announces a set of content-addressed blocks plus a
-///                 <c>.data</c> descriptor; those blocks are the incremental payload of an update.
+///                 <b>Engine payload (mini pack)</b> - a list of loose files below
+///                 <c>/loose_file/mini_pack_&lt;version&gt;/</c> that carries the engine binaries.
 ///             </item>
 ///             <item>
-///                 <b>Patch list</b> - the full manifest of the game (<c>common</c> loose files plus the
-///                 <c>mpk_*</c> shards). Comparing the local and the remote list yields exactly the files and
-///                 shards that changed, which is the file granular delta the official launcher applies as well.
+///                 <b>Patch list</b> - the full manifest of the game: the loose files of the
+///                 <c>common</c>/<c>windows64_common</c> sections plus the <c>mpk_*</c> shards and their indexes.
+///                 Comparing the local and the remote list yields exactly the objects that changed, which is
+///                 the file granular delta the official launcher applies as well.
 ///             </item>
 ///         </list>
-///         Both plans are built here; the download stage resumes partial files and verifies the MD5 of every
-///         block before it is accepted.
+///         Both parts are turned into a single <see cref="NeteaseGamesDownloadPlan" />, so the size that the
+///         host asks for and the bytes that are reported during the routine always describe the same work.
 ///     </para>
 /// </summary>
 [GeneratedComClass]
 public partial class NeteaseGamesGameInstaller : GameInstallerBase
 {
     /// <summary>
-    ///     Name of the staging directory inside the patch folder.
+    ///     Name of the staging directory inside the patch folder. Every object of a plan is downloaded here
+    ///     first, so a failed update never touches the installation.
     /// </summary>
     public const string StagingDirectoryName = ".collapse_download";
 
     private readonly NeteaseGamesGameManager? _manager;
+    private readonly HttpClient _httpClient;
+    private NeteaseGamesDownloadPlan? _cachedPlan;
 
+    /// <summary>
+    ///     Creates an installer.
+    /// </summary>
+    /// <param name="gameManager">The game manager of the same preset.</param>
     public NeteaseGamesGameInstaller(IGameManager gameManager) : base(gameManager)
     {
         _manager = gameManager as NeteaseGamesGameManager;
+        _httpClient = NeteaseGamesHttp.CreateClient();
     }
 
     /// <inheritdoc/>
     protected override async Task<long> GetGameSizeAsyncInner(GameInstallerKind gameInstallerKind, CancellationToken token)
     {
-        if ((gameInstallerKind & GameInstallerKind.Update) == GameInstallerKind.Update)
+        // The host compares this value with GetGameDownloadedSizeAsync to compute the remaining bytes and the
+        // disk space requirement, so both have to describe the same plan.
+        if (gameInstallerKind is GameInstallerKind.Install or GameInstallerKind.Update)
         {
-            NeteaseGamesDownloadPlan? plan = await BuildUpdatePlanAsync(token).ConfigureAwait(false);
-            return plan?.TotalSize ?? 0;
+            NeteaseGamesDownloadPlan plan = await GetOrBuildPlanAsync(token).ConfigureAwait(false);
+            return plan.TotalSize;
         }
 
-        string gamePath = EnsureAndGetGamePath();
-        if (Directory.Exists(gamePath))
-        {
-            return await Task.Run(() => NeteaseGamesGameManager.MeasureInstallSize(gamePath), token).ConfigureAwait(false);
-        }
-
-        NeteaseGamesMiniPackManifest? manifest = _manager?.RemoteManifest;
-        return manifest?.TotalDownloadSize ?? 0;
+        // Preload is not used by this game (there is no separate preload channel).
+        return 0;
     }
 
     /// <inheritdoc/>
     protected override async Task<long> GetGameDownloadedSizeAsyncInner(GameInstallerKind gameInstallerKind, CancellationToken token)
     {
-        string gamePath = EnsureAndGetGamePath();
-        string staging = Path.Combine(gamePath, NeteaseGamesPaths.PatchDirectoryRelativePath, StagingDirectoryName);
-        if (!Directory.Exists(staging))
+        if (gameInstallerKind is GameInstallerKind.Install or GameInstallerKind.Update)
         {
-            return 0;
+            NeteaseGamesDownloadPlan plan = await GetOrBuildPlanAsync(token).ConfigureAwait(false);
+            return plan.DownloadedSize;
         }
 
-        return await Task.Run(
-            () =>
-            {
-                long total = 0;
-                foreach (string file in Directory.EnumerateFiles(staging, "*", SearchOption.AllDirectories))
-                {
-                    try
-                    {
-                        total += new FileInfo(file).Length;
-                    }
-                    catch (Exception)
-                    {
-                        // Ignore vanished files.
-                    }
-                }
-
-                return total;
-            },
-            token).ConfigureAwait(false);
+        return 0;
     }
 
     /// <inheritdoc/>
@@ -102,7 +88,7 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         InstallProgressStateDelegate? progressStateDelegate,
         CancellationToken token)
     {
-        await RunDownloadAsync(progressDelegate, progressStateDelegate, token).ConfigureAwait(false);
+        await RunAsync(progressDelegate, progressStateDelegate, token).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>
@@ -111,7 +97,7 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         InstallProgressStateDelegate? progressStateDelegate,
         CancellationToken token)
     {
-        await RunDownloadAsync(progressDelegate, progressStateDelegate, token).ConfigureAwait(false);
+        await RunAsync(progressDelegate, progressStateDelegate, token).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>
@@ -128,15 +114,20 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
     protected override Task UninstallAsyncInner(CancellationToken token)
     {
         string gamePath = EnsureAndGetGamePath();
-        if (Directory.Exists(gamePath))
+
+        // The installation root has to be the directory the game lives in: deleting a parent directory
+        // (which may contain the official launcher) is never acceptable.
+        if (!NeteaseGamesLocalState.IsGameDirectory(gamePath))
         {
-            Directory.Delete(gamePath, recursive: true);
+            throw new InvalidOperationException(
+                $"'{gamePath}' is not a NetEase game installation, refusing to delete it.");
         }
 
+        Directory.Delete(gamePath, recursive: true);
         return Task.CompletedTask;
     }
 
-    private async Task RunDownloadAsync(
+    private async Task RunAsync(
         InstallProgressDelegate? progressDelegate,
         InstallProgressStateDelegate? progressStateDelegate,
         CancellationToken token)
@@ -145,67 +136,208 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         progressStateDelegate?.Invoke(InstallProgressState.Preparing);
 
         NeteaseGamesGameManager? manager = _manager;
-        NeteaseGamesPatchManifest? manifest = manager?.RemotePatchManifest;
-        if (manager is null || manifest is null)
+        if (manager is null)
         {
+            throw new InvalidOperationException("The installer needs the NetEase game manager of its preset.");
+        }
+
+        // The remote manifests may not have been fetched yet when the host calls straight into the installer.
+        await manager.ProbeRemoteVersionAsync(token).ConfigureAwait(false);
+
+        NeteaseGamesDownloadPlan plan = await GetOrBuildPlanAsync(token).ConfigureAwait(false);
+        if (plan.IsEmpty)
+        {
+            SharedStatic.InstanceLogger?.LogInformation("[NeteaseGames] Nothing to download, the game is up to date");
             progressStateDelegate?.Invoke(InstallProgressState.Completed);
             return;
         }
 
-        // The engine payload (the mini pack) is a separate download that the official launcher performs
-        // before the patch. It is a list of loose files below /loose_file/mini_pack_<version>/ on the game
-        // download host, so it can be applied the same way.
+        progressStateDelegate?.Invoke(InstallProgressState.Download);
+
+        long totalBytes = plan.TotalSize;
+        int totalFiles = plan.Items.Count;
+        int completedFiles = 0;
+
+        // Report the initial state right away so the host does not show a frozen "0 / N" badge.
+        ReportProgress(progressDelegate, plan.DownloadedSize, totalBytes, completedFiles, totalFiles);
+
+        NeteaseGamesDownloader downloader = new(_httpClient);
+        NeteaseGamesApplyResult result = await NeteaseGamesUpdateApplier.ApplyAsync(
+            _httpClient,
+            gamePath,
+            plan,
+            downloader,
+            bytes => ReportProgress(progressDelegate, bytes, totalBytes, Volatile.Read(ref completedFiles), totalFiles),
+            token).ConfigureAwait(false);
+
+        if (!result.IsSuccess)
+        {
+            throw new IOException(
+                $"The patch could not be applied ('{result.FailedPath}'). The installation was left untouched.");
+        }
+
+        progressStateDelegate?.Invoke(InstallProgressState.Verify);
+
+        // The local version is derived from the files on disk, so it has to be re-read after the update.
+        manager.SetGamePath(gamePath);
+        manager.EnsureLocalVersionProbed();
+
+        completedFiles = totalFiles;
+        ReportProgress(progressDelegate, totalBytes, totalBytes, completedFiles, totalFiles);
+        progressStateDelegate?.Invoke(InstallProgressState.Completed);
+    }
+
+    /// <summary>
+    ///     Builds the plan of the current installation, or returns the plan that was built before.
+    /// </summary>
+    /// <param name="token">Cancel token.</param>
+    private async Task<NeteaseGamesDownloadPlan> GetOrBuildPlanAsync(CancellationToken token)
+    {
+        string gamePath = EnsureAndGetGamePath();
+
+        NeteaseGamesDownloadPlan? cached = _cachedPlan;
+        if (cached is not null && _cachedPlanGamePath == gamePath)
+        {
+            return cached;
+        }
+
+        NeteaseGamesDownloadPlan plan = await BuildPlanAsync(gamePath, token).ConfigureAwait(false);
+        _cachedPlan = plan;
+        _cachedPlanGamePath = gamePath;
+        return plan;
+    }
+
+    private string? _cachedPlanGamePath;
+
+    /// <summary>
+    ///     Invalidates the cached plan (called when the installation changed).
+    /// </summary>
+    public void InvalidatePlan() => _cachedPlan = null;
+
+    /// <summary>
+    ///     Builds the plan of an installation.
+    /// </summary>
+    /// <param name="gamePath">The installation root.</param>
+    /// <param name="token">Cancel token.</param>
+    public async Task<NeteaseGamesDownloadPlan> BuildPlanAsync(string gamePath, CancellationToken token)
+    {
+        NeteaseGamesGameManager? manager = _manager;
+        NeteaseGamesDownloadPlan empty = new()
+        {
+            StagingDirectory = Path.Combine(gamePath, NeteaseGamesPaths.PatchDirectoryRelativePath, StagingDirectoryName)
+        };
+
+        if (manager is null)
+        {
+            return empty;
+        }
+
+        string stagingDirectory = empty.StagingDirectory;
+        NeteaseGamesDownloadPlan plan = new()
+        {
+            StagingDirectory = stagingDirectory,
+            PackageVersion = manager.RemotePackageVersion
+        };
+
+        // 1. The engine payload (mini pack): loose files below /loose_file/mini_pack_<version>/.
         NeteaseGamesMiniPackManifest? miniPack = manager.RemoteManifest;
         bool engineMissing = !File.Exists(Path.Combine(gamePath, NeteaseGamesPaths.GameExecutableRelativePath));
         if (miniPack is not null && !string.IsNullOrEmpty(miniPack.LooseFileParentDir) &&
             (engineMissing || manager.HasEngineUpdate))
         {
-            progressStateDelegate?.Invoke(InstallProgressState.Download);
-
-            bool engineOk = await NeteaseGamesEnginePatcher.ApplyAsync(
-                CreateHttpClient(),
-                gamePath,
-                miniPack.LooseFileParentDir,
-                NeteaseGamesContentEndpoints.GetEnginePayloadHosts(),
-                bytes => ReportProgress(progressDelegate, bytes, miniPack.TotalDownloadSize, 0, 1),
-                token).ConfigureAwait(false);
-
-            if (!engineOk)
+            foreach (NeteaseGamesEngineFile file in await manager
+                         .FetchEnginePayloadFileListAsync(miniPack.LooseFileParentDir, token)
+                         .ConfigureAwait(false))
             {
-                throw new IOException("The engine payload could not be applied.");
+                if (NeteaseGamesEnginePatcher.IsDeleteMarker(file))
+                {
+                    continue;
+                }
+
+                string target = file.TargetName.Replace('\\', '/');
+                string localPath = Path.Combine(gamePath, NeteaseGamesEnginePatcher.EngineDirectoryName,
+                    file.TargetName.Replace('\\', Path.DirectorySeparatorChar));
+
+                if (File.Exists(localPath) && new FileInfo(localPath).Length == file.Size)
+                {
+                    continue;
+                }
+
+                plan.Items.Add(new NeteaseGamesDownloadItem
+                {
+                    RelativePath = $"{miniPack.LooseFileParentDir.TrimEnd('/')}/{file.UrlPath}".TrimStart('/'),
+                    TargetRelativePath = $"{NeteaseGamesEnginePatcher.EngineDirectoryName}/{target}",
+                    Kind = NeteaseGamesDownloadKind.LooseFile,
+                    ExpectedSize = file.Size
+                });
             }
         }
 
-        NeteaseGamesPatchList? localList = NeteaseGamesLocalState.ReadPatchList(gamePath);
-        NeteaseGamesPatchList remoteList = await manager
-            .FetchRemotePatchListAsync(manifest.BaseVersion, token).ConfigureAwait(false);
-
-        progressStateDelegate?.Invoke(InstallProgressState.Download);
-
-        long total = 0;
-        foreach ((string _, NeteaseGamesPackageEntry package) in remoteList.Packages)
+        // 2. The patch list delta: changed loose files, changed packages and the indexes that describe them.
+        NeteaseGamesPatchManifest? manifest = manager.RemotePatchManifest;
+        if (manifest is not null && !string.IsNullOrEmpty(manifest.BaseVersion))
         {
-            total += package.TotalSize;
+            NeteaseGamesPatchList local = NeteaseGamesLocalState.ReadPatchList(gamePath) ?? new NeteaseGamesPatchList();
+            NeteaseGamesPatchList remote = await manager
+                .FetchRemotePatchListAsync(manifest.BaseVersion, token)
+                .ConfigureAwait(false);
+
+            foreach ((string path, NeteaseGamesFileEntry remoteEntry) in remote.LooseFiles)
+            {
+                if (local.LooseFiles.TryGetValue(path, out NeteaseGamesFileEntry localEntry) &&
+                    localEntry.Hash == remoteEntry.Hash)
+                {
+                    continue;
+                }
+
+                plan.Items.Add(new NeteaseGamesDownloadItem
+                {
+                    RelativePath = ContentPath(manifest.BaseVersion, null, path),
+                    TargetRelativePath = path.Replace('/', Path.DirectorySeparatorChar),
+                    Kind = NeteaseGamesDownloadKind.LooseFile,
+                    ExpectedSize = remoteEntry.Size
+                });
+            }
+
+            foreach ((string name, NeteaseGamesPackageEntry remotePackage) in remote.Packages)
+            {
+                bool changed = !local.Packages.TryGetValue(name, out NeteaseGamesPackageEntry? localPackage) ||
+                               localPackage is null ||
+                               !NeteaseGamesPatchList.HashesEqual(localPackage.Hashes, remotePackage.Hashes);
+
+                if (changed)
+                {
+                    plan.Items.Add(new NeteaseGamesDownloadItem
+                    {
+                        RelativePath = ContentPath(manifest.BaseVersion, remotePackage.Section, name),
+                        TargetRelativePath = name,
+                        Kind = IsPackageIndex(name) ? NeteaseGamesDownloadKind.Index : NeteaseGamesDownloadKind.Package,
+                        ExpectedSize = remotePackage.TotalSize
+                    });
+                }
+            }
         }
 
-        bool ok = await NeteaseGamesUpdateApplier.ApplyAsync(
-            CreateHttpClient(),
-            gamePath,
-            localList,
-            remoteList,
-            manifest.BaseVersion,
-            (int)manager.RemotePackageVersion,
-            bytes => ReportProgress(progressDelegate, bytes, total, 0, 1),
-            token).ConfigureAwait(false);
+        plan.AssignStaging(stagingDirectory);
 
-        if (!ok)
-        {
-            throw new IOException("The patch could not be applied.");
-        }
+        SharedStatic.InstanceLogger?.LogInformation(
+            "[NeteaseGames] Plan: {Packages} packages, {Indexes} indexes, {Loose} loose files, {Size} bytes",
+            plan.PackageCount, plan.IndexCount, plan.LooseCount, plan.TotalSize);
 
-        progressStateDelegate?.Invoke(InstallProgressState.Verify);
-        progressStateDelegate?.Invoke(InstallProgressState.Completed);
+        return plan;
     }
+
+    /// <summary>
+    ///     Whether a package name is a package index (<c>*.mpkinfo</c>) instead of a shard.
+    /// </summary>
+    public static bool IsPackageIndex(string name)
+        => name.EndsWith(".mpkinfo", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    ///     Builds the content path of an object below the version directory.
+    /// </summary>
+    private static string ContentPath(string version, string? section, string name)
+        => string.IsNullOrEmpty(section) ? $"{version}/{name}" : $"{version}/{section}/{name}";
 
     private static void ReportProgress(
         InstallProgressDelegate? progressDelegate,
@@ -225,150 +357,17 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
             TotalBytesToDownload = totalBytes,
             DownloadedCount = downloadedCount,
             TotalCountToDownload = totalCount,
-            StateCount = 1,
-            TotalStateToComplete = 1
+            StateCount = downloadedCount,
+            TotalStateToComplete = totalCount
         };
 
         progressDelegate(in progress);
     }
 
-    /// <summary>
-    ///     Builds the list of files that have to be downloaded for the current installation.
-    /// </summary>
-    /// <param name="token">Cancel token.</param>
-    public async Task<NeteaseGamesDownloadPlan?> BuildUpdatePlanAsync(CancellationToken token)
-    {
-        NeteaseGamesMiniPackManifest? manifest = _manager?.RemoteManifest;
-        if (manifest is null || manifest.DownloadInfo.Count == 0)
-        {
-            return null;
-        }
-
-        string gamePath = EnsureAndGetGamePath();
-        string staging = Path.Combine(gamePath, NeteaseGamesPaths.PatchDirectoryRelativePath, StagingDirectoryName);
-
-        NeteaseGamesDownloadPlan plan = new();
-
-        // The descriptor of the mini pack describes which files the blocks expand to.
-        if (!string.IsNullOrEmpty(manifest.DataName))
-        {
-            plan.Items.Add(new NeteaseGamesDownloadItem
-            {
-                RelativePath = CombineRelative(manifest.LooseFileParentDir, manifest.DataName),
-                TargetPath = Path.Combine(staging, manifest.DataName),
-                ExpectedSize = 0
-            });
-        }
-
-        foreach ((string md5, long size) in manifest.DownloadInfo)
-        {
-            plan.Items.Add(new NeteaseGamesDownloadItem
-            {
-                RelativePath = CombineRelative(manifest.LooseFileParentDir, md5),
-                ExpectedMd5 = md5,
-                ExpectedSize = size,
-                TargetPath = Path.Combine(staging, md5)
-            });
-        }
-
-        await Task.CompletedTask.ConfigureAwait(false);
-        SharedStatic.InstanceLogger?.LogInformation(
-            "[NeteaseGames] Download plan: {Count} items, {Size} bytes", plan.Items.Count, plan.TotalSize);
-        return plan;
-    }
-
-    /// <summary>
-    ///     Builds a file granular delta plan out of two patch lists.
-    /// </summary>
-    /// <param name="local">The patch list of the local installation.</param>
-    /// <param name="remote">The patch list of the remote installation.</param>
-    /// <param name="stagingDirectory">The directory the changed files are staged in.</param>
-    public static NeteaseGamesDownloadPlan BuildPatchListPlan(
-        NeteaseGamesPatchList local,
-        NeteaseGamesPatchList remote,
-        string stagingDirectory)
-    {
-        NeteaseGamesDownloadPlan plan = new();
-
-        foreach ((string path, NeteaseGamesFileEntry remoteEntry) in remote.LooseFiles)
-        {
-            if (local.LooseFiles.TryGetValue(path, out NeteaseGamesFileEntry localEntry) && localEntry.Hash == remoteEntry.Hash)
-            {
-                continue;
-            }
-
-            plan.Items.Add(new NeteaseGamesDownloadItem
-            {
-                RelativePath = path,
-                ExpectedSize = remoteEntry.Size,
-                TargetPath = Path.Combine(stagingDirectory, path.Replace('/', Path.DirectorySeparatorChar))
-            });
-        }
-
-        foreach ((string name, NeteaseGamesPackageEntry remotePackage) in remote.Packages)
-        {
-            if (local.Packages.TryGetValue(name, out NeteaseGamesPackageEntry? localPackage) &&
-                localPackage is not null &&
-                HashesEqual(localPackage.Hashes, remotePackage.Hashes))
-            {
-                continue;
-            }
-
-            plan.Items.Add(new NeteaseGamesDownloadItem
-            {
-                RelativePath = name,
-                ExpectedSize = remotePackage.TotalSize,
-                TargetPath = Path.Combine(stagingDirectory, name)
-            });
-        }
-
-        return plan;
-    }
-
-    private static bool HashesEqual(List<ulong> left, List<ulong> right)
-    {
-        if (left.Count != right.Count)
-        {
-            return false;
-        }
-
-        for (int i = 0; i < left.Count; i++)
-        {
-            if (left[i] != right[i])
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static string CombineRelative(string parent, string name)
-    {
-        if (string.IsNullOrEmpty(parent))
-        {
-            return name;
-        }
-
-        return parent.TrimEnd('/') + "/" + name;
-    }
-
-    private static HttpClient CreateHttpClient()
-    {
-        PluginHttpClientBuilder builder = new PluginHttpClientBuilder()
-            .SetAllowedDecompression(System.Net.DecompressionMethods.All)
-            .AllowRedirections()
-            .AllowUntrustedCert()
-            .AllowCookies()
-            .SetUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) CollapsePlugin/1.0");
-
-        return builder.Create();
-    }
-
     /// <inheritdoc/>
     public override void Dispose()
     {
+        _httpClient.Dispose();
         GC.SuppressFinalize(this);
     }
 }
-

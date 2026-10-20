@@ -26,6 +26,12 @@
         <NoWarn>$(NoWarn);CA1416</NoWarn>
     </PropertyGroup>
 
+    <!-- Release builds ship without symbols (see the plugin csproj for the reason). -->
+    <PropertyGroup Condition="'$(Configuration)'=='Release' Or '$(Configuration)'=='ReleaseNoReflection'">
+        <DebugType>none</DebugType>
+        <DebugSymbols>false</DebugSymbols>
+    </PropertyGroup>
+
     <PropertyGroup Condition="'$(Configuration)'=='DebugNoReflection'">
         <DefineConstants>$(DefineConstants);DEBUG;USELIGHTWEIGHTJSONPARSER</DefineConstants>
         <Optimize>false</Optimize>
@@ -35,6 +41,19 @@
         <DefineConstants>$(DefineConstants);USELIGHTWEIGHTJSONPARSER</DefineConstants>
         <Optimize>true</Optimize>
     </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    </ItemGroup>
+
+    <!-- The official key visual of the game, used as the launcher background. -->
+    <ItemGroup>
+        <EmbeddedResource Include="background.jpg" LogicalName="background.jpg" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="Hi3Helper.NeteaseGames.Tests" />
+    </ItemGroup>
 
     <ItemGroup>
         <ProjectReference Include="..\Hi3Helper.Plugin.Core\Hi3Helper.Plugin.Core.csproj"/>

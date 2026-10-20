@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO;
 using System.Text.Json;
@@ -32,31 +33,11 @@ public static class NeteaseGamesPaths
     public const string PatchDirectoryRelativePath = @"LocalData\Patch";
 
     /// <summary>
-    ///     Relative path of the file the game uses to detect that it was started by the official launcher.
-    ///     <para>
-    ///         The game opens <c>LocalData\Patch\ywzh.exe</c> while it boots. When the file is missing it shows
-    ///         the dialog "请从启动器启动游戏。" (please start the game from the launcher) and refuses to continue.
-    ///         The launcher stages a copy of the game executable there, so writing that copy is enough to make
-    ///         the game accept a direct start. The content of the file is irrelevant - only its presence is
-    ///         checked.
-    ///     </para>
-    /// </summary>
-    public const string LauncherMarkerRelativePath = @"LocalData\Patch\ywzh.exe";
-
-    /// <summary>
-    ///     Relative path of the channel tag file the launcher writes into the patch directory.
-    ///     <para>
-    ///         The file holds the encrypted channel tag (Base64 + XOR + zlib, see
-    ///         <see cref="NeteaseGamesCrypto.DecryptCpsTag" />).
-    ///     </para>
-    /// </summary>
-    public const string CpsTagRelativePath = @"LocalData\Patch\CPS_TAG";
-
-    /// <summary>
     ///     The name of the staged game executable the launcher downloads next to the running one.
     ///     <para>
     ///         The game executable hands the start over to <c>ywzh_.exe</c> (the freshly downloaded build) and
-    ///         exits; the staged build is the one that keeps running.
+    ///         exits; the staged build is the one that keeps running. Both names have to be followed when the
+    ///         lifetime of the game is tracked.
     ///     </para>
     /// </summary>
     public const string StagedGameExecutableName = "ywzh_.exe";
@@ -122,6 +103,9 @@ public static class NeteaseGamesPaths
 /// </summary>
 public sealed class NeteaseGamesLocalState
 {
+    private static readonly ConcurrentDictionary<string, (DateTime WriteTime, long Length, NeteaseGamesPatchList? List)>
+        PatchListCache = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
     ///     The content/package version (<c>pkgversion</c>), e.g. <c>6521279</c>.
     /// </summary>
@@ -151,11 +135,6 @@ public sealed class NeteaseGamesLocalState
     ///     The shader cache version.
     /// </summary>
     public string ShaderVersion { get; init; } = string.Empty;
-
-    /// <summary>
-    ///     Whether the local installation is behind the announced patch version.
-    /// </summary>
-    public bool HasContentUpdate => PatchVersion > PackageVersion && PackageVersion > 0;
 
     /// <summary>
     ///     Reads the local state from a game installation directory.
@@ -196,7 +175,7 @@ public sealed class NeteaseGamesLocalState
                     }
                 }
             }
-            catch (Exception)
+            catch (Exception ex) when (ex is IOException or InvalidDataException or FormatException)
             {
                 // A broken patchmd5 file must not prevent the rest of the state from being read.
             }
@@ -234,7 +213,7 @@ public sealed class NeteaseGamesLocalState
                     shaderVersion = shaderValue.GetString() ?? string.Empty;
                 }
             }
-            catch (Exception)
+            catch (Exception ex) when (ex is IOException or JsonException)
             {
                 // Ignore malformed version data.
             }
@@ -253,6 +232,10 @@ public sealed class NeteaseGamesLocalState
 
     /// <summary>
     ///     Reads the decrypted local patch list.
+    ///     <para>
+    ///         The list is 17 MB of JSON with more than 230k entries, and the host asks for it from the
+    ///         synchronously answered size getters, so the parsed result is cached until the file changes.
+    ///     </para>
     /// </summary>
     /// <param name="gameDirectory">The root of the game installation.</param>
     public static NeteaseGamesPatchList? ReadPatchList(string gameDirectory)
@@ -260,26 +243,61 @@ public sealed class NeteaseGamesLocalState
         string file = Path.Combine(gameDirectory, NeteaseGamesPaths.PatchDirectoryRelativePath, NeteaseGamesPaths.PatchListFileName);
         if (!File.Exists(file))
         {
+            InvalidatePatchListCache(gameDirectory);
             return null;
         }
 
+        DateTime writeTime;
+        long length;
         try
         {
-            byte[] plain = NeteaseGamesCrypto.DecryptHexEnvelope(File.ReadAllBytes(file));
-            return NeteaseGamesPatchList.Parse(plain);
+            FileInfo info = new(file);
+            writeTime = info.LastWriteTimeUtc;
+            length = info.Length;
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return null;
         }
+
+        if (PatchListCache.TryGetValue(file, out (DateTime WriteTime, long Length, NeteaseGamesPatchList? List) cached) &&
+            cached.WriteTime == writeTime &&
+            cached.Length == length)
+        {
+            return cached.List;
+        }
+
+        NeteaseGamesPatchList? list = null;
+        try
+        {
+            byte[] plain = NeteaseGamesCrypto.DecryptHexEnvelope(File.ReadAllBytes(file));
+            list = NeteaseGamesPatchList.Parse(plain);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or FormatException or JsonException)
+        {
+            // A broken list behaves like a missing one: everything is treated as changed.
+        }
+
+        PatchListCache[file] = (writeTime, length, list);
+        return list;
+    }
+
+    /// <summary>
+    ///     Drops the cached patch list of an installation (call it after the installation changed).
+    /// </summary>
+    /// <param name="gameDirectory">The root of the game installation.</param>
+    public static void InvalidatePatchListCache(string gameDirectory)
+    {
+        string file = Path.Combine(gameDirectory, NeteaseGamesPaths.PatchDirectoryRelativePath, NeteaseGamesPaths.PatchListFileName);
+        PatchListCache.TryRemove(file, out _);
     }
 
     /// <summary>
     ///     Finds an existing installation by looking at the launcher registry key.
     ///     <para>
     ///         The official launcher stores the game directory in <c>AdditionalPaths</c> and its own directory
-    ///         in <c>InstPath</c> - and the latter contains four U+200B zero width spaces, so it must never be
-    ///         used as a path directly.
+    ///         in <c>InstPath</c> - and the latter contains zero width spaces, so it must never be used as a
+    ///         path directly.
     ///     </para>
     /// </summary>
     /// <returns>The game directory, or <c>null</c> when nothing was found.</returns>
@@ -314,7 +332,7 @@ public sealed class NeteaseGamesLocalState
                     string cleaned = CleanPath(installPath);
                     // The launcher lives in a sibling directory of the game directory.
                     string? parent = Path.GetDirectoryName(cleaned.TrimEnd(Path.DirectorySeparatorChar));
-                    if (parent is not null)
+                    if (parent is not null && Directory.Exists(parent))
                     {
                         foreach (string candidate in Directory.EnumerateDirectories(parent))
                         {
@@ -326,7 +344,8 @@ public sealed class NeteaseGamesLocalState
                     }
                 }
             }
-            catch (Exception)
+            catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException
+                                           or IOException)
             {
                 // Registry access may be denied; keep probing the other hive.
             }
@@ -359,7 +378,7 @@ public sealed class NeteaseGamesLocalState
         {
             return File.Exists(Path.Combine(directory, NeteaseGamesPaths.GameExecutableRelativePath));
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is ArgumentException or IOException or System.Security.SecurityException)
         {
             return false;
         }
@@ -387,7 +406,7 @@ public sealed class NeteaseGamesLocalState
         {
             return File.Exists(path) ? File.ReadAllText(path).Trim() : string.Empty;
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return string.Empty;
         }

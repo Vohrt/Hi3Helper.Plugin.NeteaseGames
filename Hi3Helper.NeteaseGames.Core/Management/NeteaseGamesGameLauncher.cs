@@ -2,12 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading;
-using Microsoft.Extensions.Logging;
 using System.Threading.Tasks;
 using Hi3Helper.Plugin.Core;
 using Hi3Helper.Plugin.Core.Utility;
+using Microsoft.Extensions.Logging;
 
 namespace Hi3Helper.NeteaseGames.Core.Management;
 
@@ -16,9 +17,8 @@ namespace Hi3Helper.NeteaseGames.Core.Management;
 ///     <para>
 ///         The NetEase client ships the complete account stack (UniSDK) itself, so the launcher is only a
 ///         download manager - the game can be started on its own. The start contract was taken from a running
-///         official launcher: it starts the game executable of the installation with the installation root as
-///         the working directory and with four arguments, without staging a copy of the executable and without
-///         the file system arguments of the launcher.
+///         official launcher: it starts the game executable of the installation with the directory of the
+///         executable as the working directory and with four arguments.
 ///     </para>
 /// </summary>
 public static class NeteaseGamesGameLauncher
@@ -35,65 +35,19 @@ public static class NeteaseGamesGameLauncher
         "--start=Python --use-pso-precache=1 --python-args=innerdesktop;script_mode#RELEASE_MODE --dx12";
 
     /// <summary>
-    ///     Starts the game executable of an installation.
+    ///     How long the game may take to show its window before the start is treated as failed.
     /// </summary>
-    /// <param name="gameDirectory">The root of the game installation.</param>
-    /// <param name="arguments">The command line arguments, or <c>null</c> for <see cref="DefaultGameArguments" />.</param>
-    /// <param name="channelTag">The channel tag of the installation, or <c>null</c> when it is unknown.</param>
-    /// <returns>The started process.</returns>
-    /// <exception cref="FileNotFoundException">The game executable does not exist.</exception>
-    public static Process Launch(string gameDirectory, string? arguments = null, string? channelTag = null)
-    {
-        string executable = Path.Combine(gameDirectory, NeteaseGamesPaths.GameExecutableRelativePath);
-        if (!File.Exists(executable))
-        {
-            throw new FileNotFoundException("The game executable could not be found.", executable);
-        }
-
-        PrepareLaunch(gameDirectory, channelTag);
-
-        ProcessStartInfo startInfo = new(executable)
-        {
-            // The game resolves its resources relative to the working directory, so it has to be the
-            // directory of the game executable (verified: with the installation root the game crashes).
-            WorkingDirectory = Path.GetDirectoryName(executable) ?? gameDirectory,
-            // The game executable is manifested as "requireAdministrator", so it has to be started through the
-            // shell - a plain CreateProcess would fail with ERROR_ELEVATION_REQUIRED (740).
-            UseShellExecute = true,
-            Verb = "runas"
-        };
-
-        string effectiveArguments = arguments ?? DefaultGameArguments;
-        startInfo.Arguments = QuoteArguments(effectiveArguments);
-
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("The game process could not be started.");
-    }
-
-    /// <summary>
-    ///     Prepares an installation for a direct start.
-    ///     <para>
-    ///         Nothing has to be prepared: the official launcher does not stage a copy of the game executable
-    ///         either, it starts the executable of the installation itself. The state of the patch directory
-    ///         belongs to the game itself - a directly started game rewrites its version and check files.
-    ///     </para>
-    /// </summary>
-    /// <param name="gameDirectory">The root of the game installation.</param>
-    /// <param name="channelTag">The channel tag of the installation, or <c>null</c> when it is unknown.</param>
-    public static void PrepareLaunch(string gameDirectory, string? channelTag = null)
-    {
-        string executable = Path.Combine(gameDirectory, NeteaseGamesPaths.GameExecutableRelativePath);
-        if (!File.Exists(executable))
-        {
-            throw new FileNotFoundException("The game executable could not be found.", executable);
-        }
-    }
+    public static readonly TimeSpan WindowTimeout = TimeSpan.FromMinutes(3);
 
     /// <summary>
     ///     Quotes the arguments that contain a semicolon, otherwise the Windows command line parser would cut
     ///     them in half (the <c>--python-args=innerdesktop;script_mode#RELEASE_MODE</c> argument).
     /// </summary>
+    /// <param name="arguments">The raw command line.</param>
     public static string QuoteArguments(string arguments)
     {
+        ArgumentNullException.ThrowIfNull(arguments);
+
         StringBuilder builder = new();
         int start = 0;
         for (int i = 0; i <= arguments.Length; i++)
@@ -130,52 +84,77 @@ public static class NeteaseGamesGameLauncher
     }
 
     /// <summary>
-    ///     Checks whether the game is currently running.
+    ///     Lists the processes of the game of a specific installation.
+    ///     <para>
+    ///         The process is matched by its <b>path</b>, not only by its name: two installations of the game
+    ///         (or another NetEase title that happens to use the same executable name) must not be confused,
+    ///         and a kill must never hit a process of another installation.
+    ///     </para>
     /// </summary>
-    /// <param name="gameDirectory">The root of the game installation.</param>
-    public static bool IsRunning(string gameDirectory)
+    /// <param name="gameDirectory">The root of the installation.</param>
+    public static IReadOnlyList<Process> GetGameProcesses(string gameDirectory)
     {
-        foreach (string processName in GetProcessNames(gameDirectory))
+        string executable = Path.GetFullPath(Path.Combine(gameDirectory, NeteaseGamesPaths.GameExecutableRelativePath));
+        string binariesDirectory = Path.GetDirectoryName(executable) ?? gameDirectory;
+        string gameRoot = Path.GetFullPath(gameDirectory);
+
+        List<Process> processes = [];
+        foreach (string name in GetProcessNames(executable))
         {
-            foreach (Process process in Process.GetProcessesByName(processName))
+            foreach (Process process in Process.GetProcessesByName(name))
             {
-                try
+                if (BelongsToInstallation(process, gameRoot, binariesDirectory))
                 {
-                    return true;
+                    processes.Add(process);
                 }
-                finally
+                else
                 {
                     process.Dispose();
                 }
             }
         }
 
-        return false;
+        return processes;
     }
 
     /// <summary>
-    ///     Lists the processes of the game (used by the host to follow the lifetime of the game).
+    ///     Checks whether a process belongs to an installation (by executable path, or by user name as a
+    ///     fallback when the path cannot be read because the process is elevated).
     /// </summary>
-    /// <param name="gameDirectory">The root of the game installation.</param>
-    public static IReadOnlyList<int> GetRunningProcessIds(string gameDirectory)
+    private static bool BelongsToInstallation(Process process, string gameRoot, string binariesDirectory)
     {
-        List<int> ids = [];
-        foreach (string processName in GetProcessNames(gameDirectory))
+        try
         {
-            foreach (Process process in Process.GetProcessesByName(processName))
+            string? path = process.MainModule?.FileName;
+            if (string.IsNullOrEmpty(path))
             {
-                try
-                {
-                    ids.Add(process.Id);
-                }
-                finally
-                {
-                    process.Dispose();
-                }
+                return false;
             }
-        }
 
-        return ids;
+            string fullPath = Path.GetFullPath(path);
+            return IsUnder(fullPath, gameRoot) || IsUnder(fullPath, binariesDirectory);
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException
+                                       or NotSupportedException)
+        {
+            // The executable of an elevated process cannot be inspected from a non elevated host. The name
+            // check above already matched, so the process is assumed to be ours - it is only reported as
+            // "running", never killed on that basis alone (see KillRunningGame).
+            return process.ProcessName.Contains("ywzh", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static bool IsUnder(string path, string root)
+    {
+        StringComparison comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
+        string normalizedRoot = root.EndsWith(Path.DirectorySeparatorChar)
+            ? root
+            : root + Path.DirectorySeparatorChar;
+
+        return path.StartsWith(normalizedRoot, comparison);
     }
 
     /// <summary>
@@ -185,9 +164,8 @@ public static class NeteaseGamesGameLauncher
     ///         taken into account when the lifetime of the game is followed.
     ///     </para>
     /// </summary>
-    private static IEnumerable<string> GetProcessNames(string gameDirectory)
+    private static IEnumerable<string> GetProcessNames(string executable)
     {
-        string executable = Path.Combine(gameDirectory, NeteaseGamesPaths.GameExecutableRelativePath);
         string processName = Path.GetFileNameWithoutExtension(executable);
         yield return processName;
 
@@ -205,6 +183,7 @@ public static class NeteaseGamesGameLauncher
     ///     <para>
     ///         The plugin takes over the start because the game has to be started with elevation (its manifest
     ///         asks for administrator rights) and because the host does not know the start contract of the game.
+    ///         The returned task completes when the game exits.
     ///     </para>
     /// </summary>
     public static (bool IsSupported, Task<bool> Task) LaunchGameFromGameManager(
@@ -226,16 +205,6 @@ public static class NeteaseGamesGameLauncher
                 return false;
             }
 
-            // The official launcher writes the channel tag of the installation when it is missing.
-            PrepareLaunch(gamePath);
-
-            // The game ships the account stack (UniSDK) itself and shows its own login dialog, so no login
-            // state has to be provided. A stored state is still applied when there is one.
-            if (NeteaseGamesSession.ApplyStoredSession())
-            {
-                SharedStatic.InstanceLogger?.LogInformation("[NeteaseGames] The stored login state was applied");
-            }
-
             ProcessStartInfo startInfo = new(executable)
             {
                 // The game resolves its resources relative to the working directory, so it has to be the
@@ -248,39 +217,53 @@ public static class NeteaseGamesGameLauncher
                 Arguments = QuoteArguments(CombineArguments(DefaultGameArguments, startArgument))
             };
 
+            // The stored login state is applied only around the start: the tokens are a credential and must
+            // not stay in the long living host process.
+            using IDisposable? session = NeteaseGamesSession.ApplyStoredSession();
+            if (session is not null)
+            {
+                SharedStatic.InstanceLogger?.LogInformation("[NeteaseGames] The stored login state was applied");
+            }
+
             Process? process;
             try
             {
                 process = Process.Start(startInfo);
             }
-            catch (Exception)
+            catch (System.ComponentModel.Win32Exception ex)
             {
+                // The most common cause is the user declining the elevation prompt (1223 = cancelled).
+                SharedStatic.InstanceLogger?.LogError(
+                    "[NeteaseGames] The game could not be started: {Msg} (code {Code})", ex.Message, ex.NativeErrorCode);
+                return false;
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or IOException)
+            {
+                SharedStatic.InstanceLogger?.LogError("[NeteaseGames] The game could not be started: {Msg}", ex.Message);
                 return false;
             }
 
             if (process is null)
             {
+                SharedStatic.InstanceLogger?.LogError("[NeteaseGames] The game process could not be created");
                 return false;
             }
 
-            using (process)
+            // The process object of an elevated child is usable, but its handle is not owned by us.
+            try
             {
-                try
-                {
-                    process.PriorityBoostEnabled = isRunBoosted;
-                    process.PriorityClass = processPriority;
-                }
-                catch (Exception)
-                {
-                    // The priority of an elevated process cannot be changed from a non elevated host.
-                }
+                process.Dispose();
+            }
+            catch (Exception ex) when (ex is InvalidOperationException)
+            {
+                // Ignore: the game keeps running regardless of this handle.
             }
 
             // The game opens its window a little later; until then it only holds a few hundred megabytes.
-            if (!await WaitForGameWindowAsync(gamePath, TimeSpan.FromMinutes(3), token).ConfigureAwait(false))
+            if (!await WaitForGameWindowAsync(gamePath, WindowTimeout, token).ConfigureAwait(false))
             {
                 SharedStatic.InstanceLogger?.LogError(
-                    "[NeteaseGames] The game did not open a window within three minutes");
+                    "[NeteaseGames] The game did not open a window within {Timeout}", WindowTimeout);
                 return false;
             }
 
@@ -292,8 +275,7 @@ public static class NeteaseGamesGameLauncher
     /// <summary>
     ///     Waits until the game shows its window.
     /// </summary>
-    private static async Task<bool> WaitForGameWindowAsync(
-        string gameDirectory, TimeSpan timeout, CancellationToken token)
+    private static async Task<bool> WaitForGameWindowAsync(string gameDirectory, TimeSpan timeout, CancellationToken token)
     {
         DateTime deadline = DateTime.UtcNow + timeout;
 
@@ -308,46 +290,28 @@ public static class NeteaseGamesGameLauncher
                 return false;
             }
 
-            foreach (string processName in GetProcessNames(gameDirectory))
+            foreach (Process candidate in GetGameProcesses(gameDirectory))
             {
-                foreach (Process candidate in Process.GetProcessesByName(processName))
+                try
                 {
-                    try
+                    candidate.Refresh();
+                    if (candidate.MainWindowHandle != IntPtr.Zero)
                     {
-                        candidate.Refresh();
-                        if (candidate.MainWindowHandle != IntPtr.Zero)
-                        {
-                            return true;
-                        }
+                        return true;
                     }
-                    catch (Exception)
-                    {
-                        // The process may have exited in the meantime.
-                    }
-                    finally
-                    {
-                        candidate.Dispose();
-                    }
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                    // The process may have exited in the meantime.
+                }
+                finally
+                {
+                    candidate.Dispose();
                 }
             }
         }
 
         return false;
-    }
-
-    /// <summary>
-    ///     Restores the search path of the host process.
-    /// </summary>
-    private static void RestorePath(string? path)
-    {
-        try
-        {
-            Environment.SetEnvironmentVariable("PATH", path);
-        }
-        catch (Exception)
-        {
-            // Ignore, the path is restored on the next start anyway.
-        }
     }
 
     /// <summary>
@@ -364,29 +328,26 @@ public static class NeteaseGamesGameLauncher
             return true;
         }
 
-        foreach (string processName in GetProcessNames(gamePath))
+        foreach (Process process in GetGameProcesses(gamePath))
         {
-            foreach (Process process in Process.GetProcessesByName(processName))
+            try
             {
+                isGameRunning = true;
                 try
                 {
-                    isGameRunning = true;
-                    try
-                    {
-                        gameStartTime = process.StartTime;
-                    }
-                    catch (Exception)
-                    {
-                        // The start time of an elevated process is not readable from a non elevated host.
-                        gameStartTime = DateTime.Now;
-                    }
-
-                    return true;
+                    gameStartTime = process.StartTime;
                 }
-                finally
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
                 {
-                    process.Dispose();
+                    // The start time of an elevated process is not readable from a non elevated host.
+                    gameStartTime = DateTime.Now;
                 }
+
+                return true;
+            }
+            finally
+            {
+                process.Dispose();
             }
         }
 
@@ -425,8 +386,27 @@ public static class NeteaseGamesGameLauncher
     }
 
     /// <summary>
+    ///     Checks whether the game of an installation is running.
+    /// </summary>
+    /// <param name="gameDirectory">The root of the installation.</param>
+    public static bool IsRunning(string gameDirectory)
+    {
+        foreach (Process process in GetGameProcesses(gameDirectory))
+        {
+            process.Dispose();
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
     ///     Stops the game.
     /// </summary>
+    /// <returns>
+    ///     <c>true</c> when the game was stopped (or was not running); <c>false</c> when a process could not be
+    ///     stopped, e.g. because the host is not elevated while the game is.
+    /// </returns>
     public static bool KillRunningGame(GameManagerExtension.RunGameFromGameManagerContext context,
         out bool wasGameRunning, out DateTime gameStartTime)
     {
@@ -438,40 +418,43 @@ public static class NeteaseGamesGameLauncher
             return true;
         }
 
-        foreach (string processName in GetProcessNames(gamePath))
+        bool allKilled = true;
+        foreach (Process process in GetGameProcesses(gamePath))
         {
-            foreach (Process process in Process.GetProcessesByName(processName))
+            try
             {
+                wasGameRunning = true;
                 try
                 {
-                    wasGameRunning = true;
-                    try
-                    {
-                        gameStartTime = process.StartTime;
-                    }
-                    catch (Exception)
-                    {
-                        // The start time of an elevated process is not readable from a non elevated host.
-                        gameStartTime = DateTime.Now;
-                    }
-
-                    try
-                    {
-                        process.Kill(entireProcessTree: true);
-                    }
-                    catch (Exception)
-                    {
-                        // The process may have exited in the meantime.
-                    }
+                    gameStartTime = process.StartTime;
                 }
-                finally
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
                 {
-                    process.Dispose();
+                    // The start time of an elevated process is not readable from a non elevated host.
+                    gameStartTime = DateTime.Now;
                 }
+
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+                {
+                    // An elevated game cannot be killed from a non elevated host: report it instead of
+                    // pretending that the button worked.
+                    allKilled = false;
+                    SharedStatic.InstanceLogger?.LogWarning(
+                        "[NeteaseGames] The game process could not be stopped: {Msg} (code {Code})",
+                        ex.Message, (ex as System.ComponentModel.Win32Exception)?.NativeErrorCode ?? 0);
+                }
+            }
+            finally
+            {
+                process.Dispose();
             }
         }
 
-        return true;
+        return allKilled;
     }
 
     /// <summary>
@@ -509,7 +492,7 @@ public static class NeteaseGamesGameLauncher
             context.GameManager.GetGamePath(out string? path);
             gamePath = path ?? string.Empty;
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is InvalidOperationException or NullReferenceException)
         {
             // The host may not have a game path yet.
         }

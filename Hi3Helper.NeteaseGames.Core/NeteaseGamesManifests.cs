@@ -158,6 +158,29 @@ public sealed class NeteaseGamesPatchList
     public List<string> FileSections { get; } = [];
 
     /// <summary>
+    ///     Compares the hash lists of two packages.
+    /// </summary>
+    /// <param name="left">The first hash list.</param>
+    /// <param name="right">The second hash list.</param>
+    public static bool HashesEqual(List<ulong> left, List<ulong> right)
+    {
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < left.Count; i++)
+        {
+            if (left[i] != right[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     ///     Parses the patch list.
     /// </summary>
     /// <param name="json">The raw (already decrypted) JSON payload.</param>
@@ -322,6 +345,121 @@ public sealed class NeteaseGamesPatchList
                 target.Add(reader.GetString() ?? string.Empty);
             }
         }
+    }
+}
+
+/// <summary>
+///     The JSON part of the remote patch manifest (<c>patchmd5_windows64_normal.txt</c>).
+///     <para>
+///         The document starts with four numeric lines and is followed by a JSON object. The second line is the
+///         hash of the remote file list, the <c>normal.latest_pkgversion</c> property of the JSON part carries
+///         the authoritative package version.
+///     </para>
+/// </summary>
+public sealed record NeteaseGamesPatchManifest
+{
+    /// <summary>The base version of the patch (the version directory of the content host).</summary>
+    public string BaseVersion { get; init; } = string.Empty;
+
+    /// <summary>The newest package version.</summary>
+    public long LatestPackageVersion { get; init; }
+
+    /// <summary>The engine version the patch belongs to.</summary>
+    public string EngineVersion { get; init; } = string.Empty;
+
+    /// <summary>The version of the patch list (the hash of the remote file list).</summary>
+    public ulong PatchListHash { get; init; }
+
+    /// <summary>
+    ///     Parses the manifest.
+    /// </summary>
+    /// <param name="text">The raw text of the manifest.</param>
+    public static NeteaseGamesPatchManifest Parse(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+
+        NeteaseGamesPatchManifest result = new();
+        string[] lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length >= 2 && ulong.TryParse(lines[1], out ulong patchListHash))
+        {
+            result = result with { PatchListHash = patchListHash };
+        }
+
+        int start = text.IndexOf('{');
+        if (start < 0)
+        {
+            return result;
+        }
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(text[start..]);
+            JsonElement root = document.RootElement;
+
+            long latest = 0;
+            string baseVersion = string.Empty;
+            string engineVersion = string.Empty;
+            if (root.TryGetProperty("@metadata@", out JsonElement metadata))
+            {
+                // The authoritative package version of the branch. `normal.latest_pkgversion` must NOT be
+                // used: it carried a stale value from another branch (5282637) while the real version was
+                // 6534552, which made the plugin report a permanent update.
+                if (metadata.TryGetProperty("@private_res_version@", out JsonElement privateVersion))
+                {
+                    if (privateVersion.ValueKind == JsonValueKind.Number && privateVersion.TryGetInt64(out long parsedNumber))
+                    {
+                        latest = parsedNumber;
+                    }
+                    else if (privateVersion.ValueKind == JsonValueKind.String &&
+                             long.TryParse(privateVersion.GetString(), out long parsedText))
+                    {
+                        latest = parsedText;
+                    }
+                }
+
+                if (metadata.TryGetProperty("@base_version@", out JsonElement baseElement))
+                {
+                    baseVersion = baseElement.ValueKind switch
+                    {
+                        JsonValueKind.Number => baseElement.GetRawText(),
+                        JsonValueKind.String => baseElement.GetString() ?? string.Empty,
+                        _ => string.Empty
+                    };
+                }
+
+                if (metadata.TryGetProperty("@engine_version@", out JsonElement engineElement) &&
+                    engineElement.ValueKind == JsonValueKind.String)
+                {
+                    engineVersion = engineElement.GetString() ?? string.Empty;
+                }
+            }
+
+            if (latest <= 0)
+            {
+                // Fall back to the fourth numeric line, which repeats the same version.
+                string[] versionLines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                for (int i = 2; i < versionLines.Length && i < 4; i++)
+                {
+                    if (long.TryParse(versionLines[i], out long candidate) && candidate > latest)
+                    {
+                        latest = candidate;
+                    }
+                }
+            }
+
+            result = result with
+            {
+                LatestPackageVersion = latest,
+                BaseVersion = baseVersion,
+                EngineVersion = engineVersion
+            };
+        }
+        catch (JsonException)
+        {
+            return result;
+        }
+
+        return result;
     }
 }
 

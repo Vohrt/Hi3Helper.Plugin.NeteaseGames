@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -45,23 +44,30 @@ public sealed record NeteaseGamesEngineFile(string RelativePath, ulong Hash, lon
 ///         file <c>md5_engine.txt</c> of that directory; every line is
 ///         <c>&lt;path&gt; &lt;hash&gt; &lt;size&gt;</c>.
 ///     </para>
+///     <para>
+///         The files are turned into items of a <see cref="Management.NeteaseGamesDownloadPlan" /> and moved into
+///         place by <see cref="NeteaseGamesUpdateApplier" />, so the engine payload gets the same resume,
+///         verification and write ordering as the rest of the patch. Nothing is buffered in memory here: the
+///         payload contains files of more than 100 MB.
+///     </para>
 /// </summary>
 public static class NeteaseGamesEnginePatcher
 {
-    /// <summary>
-    ///     The name of the file list inside the payload directory.
-    /// </summary>
+    /// <summary>The name of the file list inside the payload directory.</summary>
     public const string EngineFileListName = "md5_engine.txt";
 
-    /// <summary>
-    ///     The prefix of the entries that describe files which have to be removed.
-    /// </summary>
+    /// <summary>The prefix of the entries that describe files which have to be removed.</summary>
     public const string DeleteDirectoryPrefix = "used_del_dir";
 
-    /// <summary>
-    ///     The directory of the engine inside the game directory.
-    /// </summary>
+    /// <summary>The directory of the engine inside the game directory.</summary>
     public const string EngineDirectoryName = "Engine";
+
+    /// <summary>
+    ///     Whether an entry of the file list is a marker that asks for a removal instead of a file.
+    /// </summary>
+    /// <param name="file">The entry.</param>
+    public static bool IsDeleteMarker(NeteaseGamesEngineFile file)
+        => file.RelativePath.StartsWith(DeleteDirectoryPrefix, StringComparison.Ordinal);
 
     /// <summary>
     ///     Parses the <c>md5_engine.txt</c> file list.
@@ -70,6 +76,10 @@ public static class NeteaseGamesEnginePatcher
     public static IReadOnlyList<NeteaseGamesEngineFile> ParseEngineFileList(string text)
     {
         List<NeteaseGamesEngineFile> files = [];
+        if (string.IsNullOrEmpty(text))
+        {
+            return files;
+        }
 
         foreach (string line in text.Split('\n'))
         {
@@ -111,159 +121,52 @@ public static class NeteaseGamesEnginePatcher
     }
 
     /// <summary>
-    ///     Downloads the engine payload and writes it into the game directory.
+    ///     Downloads the file list of an engine payload.
     /// </summary>
     /// <param name="client">The HTTP client.</param>
-    /// <param name="gameDirectory">The game directory.</param>
-    /// <param name="looseFileParentDir">
-    ///     The payload directory (e.g. <c>loose_file/mini_pack_202610151759</c>).
-    /// </param>
+    /// <param name="looseFileParentDir">The payload directory (e.g. <c>loose_file/mini_pack_202610151759</c>).</param>
     /// <param name="hosts">The hosts that may serve the payload.</param>
-    /// <param name="progress">Reports the number of downloaded bytes.</param>
     /// <param name="token">The cancellation token.</param>
-    /// <param name="maxFiles">
-    ///     The maximum number of files that are applied (null = all of them); a repair run only needs a few.
-    /// </param>
-    /// <returns>Whether the payload was applied.</returns>
-    public static async Task<bool> ApplyAsync(
+    /// <returns>The entries of the file list; an empty list when it could not be downloaded.</returns>
+    public static async Task<IReadOnlyList<NeteaseGamesEngineFile>> FetchFileListAsync(
         HttpClient client,
-        string gameDirectory,
         string looseFileParentDir,
         IReadOnlyList<string> hosts,
-        Action<long>? progress,
-        CancellationToken token,
-        int? maxFiles = null)
+        CancellationToken token)
     {
-        ArgumentException.ThrowIfNullOrEmpty(gameDirectory);
+        ArgumentNullException.ThrowIfNull(client);
         ArgumentException.ThrowIfNullOrEmpty(looseFileParentDir);
 
         string listPath = $"/{looseFileParentDir.TrimStart('/')}/{EngineFileListName}";
-        string? list = null;
         foreach (string host in hosts)
         {
             string url = NeteaseGamesUrlSigner.Sign($"https://{host}{listPath}", DateTimeOffset.UtcNow);
             try
             {
                 using HttpResponseMessage response = await client.GetAsync(url, token).ConfigureAwait(false);
-                if (response.IsSuccessStatusCode)
+                if (!response.IsSuccessStatusCode)
                 {
-                    list = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
-                    break;
+                    continue;
                 }
+
+                string list = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
+                IReadOnlyList<NeteaseGamesEngineFile> files = ParseEngineFileList(list);
+                SharedStatic.InstanceLogger?.LogInformation(
+                    "[NeteaseGames] The engine payload contains {Count} files", files.Count);
+                return files;
             }
-            catch (Exception e) when (e is HttpRequestException or TaskCanceledException)
+            catch (OperationCanceledException)
             {
-                // Try the next host.
+                throw;
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException)
+            {
+                SharedStatic.InstanceLogger?.LogWarning(
+                    "[NeteaseGames] The engine file list of {Host} could not be read: {Msg}", host, ex.Message);
             }
         }
 
-        if (list is null)
-        {
-            SharedStatic.InstanceLogger?.LogError("[NeteaseGames] The engine file list could not be downloaded");
-            return false;
-        }
-
-        IReadOnlyList<NeteaseGamesEngineFile> files = ParseEngineFileList(list);
-        SharedStatic.InstanceLogger?.LogInformation(
-            "[NeteaseGames] The engine payload contains {Count} files", files.Count);
-
-        string engineDirectory = Path.Combine(gameDirectory, EngineDirectoryName);
-        long downloaded = 0;
-        int applied = 0;
-
-        foreach (NeteaseGamesEngineFile file in files)
-        {
-            token.ThrowIfCancellationRequested();
-
-            if (maxFiles.HasValue && applied >= maxFiles.Value)
-            {
-                break;
-            }
-
-            if (file.RelativePath.StartsWith(DeleteDirectoryPrefix, StringComparison.Ordinal))
-            {
-                TryDelete(engineDirectory, file);
-                continue;
-            }
-
-            string target = Path.Combine(engineDirectory,
-                file.TargetName.Replace('\\', Path.DirectorySeparatorChar));
-            if (File.Exists(target) && new FileInfo(target).Length == file.Size)
-            {
-                downloaded += file.Size;
-                progress?.Invoke(downloaded);
-                applied++;
-                continue;
-            }
-
-            byte[]? payload = await DownloadAsync(client, looseFileParentDir, file, hosts, token)
-                .ConfigureAwait(false);
-            if (payload is null)
-            {
-                SharedStatic.InstanceLogger?.LogError("[NeteaseGames] The engine file {Path} could not be downloaded",
-                    file.RelativePath);
-                return false;
-            }
-
-            if (file.Size > 0 && payload.LongLength != file.Size)
-            {
-                SharedStatic.InstanceLogger?.LogError(
-                    "[NeteaseGames] The engine file {Path} has the wrong size ({Actual} instead of {Expected})",
-                    file.RelativePath, payload.LongLength, file.Size);
-                return false;
-            }
-
-            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            await File.WriteAllBytesAsync(target, payload, token).ConfigureAwait(false);
-
-            downloaded += payload.LongLength;
-            progress?.Invoke(downloaded);
-            applied++;
-        }
-
-        SharedStatic.InstanceLogger?.LogInformation("[NeteaseGames] The engine payload was applied ({Count} files)",
-            applied);
-        return true;
-    }
-
-    private static async Task<byte[]?> DownloadAsync(HttpClient client, string looseFileParentDir,
-        NeteaseGamesEngineFile file, IReadOnlyList<string> hosts, CancellationToken token)
-    {
-        string path = $"/{looseFileParentDir.TrimStart('/')}/{file.UrlPath}";
-        foreach (string host in hosts)
-        {
-            string url = NeteaseGamesUrlSigner.Sign($"https://{host}{path}", DateTimeOffset.UtcNow);
-            try
-            {
-                using HttpResponseMessage response = await client.GetAsync(url, token).ConfigureAwait(false);
-                if (response.IsSuccessStatusCode)
-                {
-                    return await response.Content.ReadAsByteArrayAsync(token).ConfigureAwait(false);
-                }
-            }
-            catch (Exception e) when (e is HttpRequestException or TaskCanceledException)
-            {
-                // Try the next host.
-            }
-        }
-
-        return null;
-    }
-
-    private static void TryDelete(string engineDirectory, NeteaseGamesEngineFile file)
-    {
-        try
-        {
-            string target = Path.Combine(engineDirectory,
-                file.TargetName.Replace('\\', Path.DirectorySeparatorChar));
-            if (File.Exists(target))
-            {
-                File.Delete(target);
-            }
-        }
-        catch (Exception)
-        {
-            // Removing an obsolete file is best effort.
-        }
+        SharedStatic.InstanceLogger?.LogError("[NeteaseGames] The engine file list could not be downloaded");
+        return [];
     }
 }
