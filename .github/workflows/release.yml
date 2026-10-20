@@ -99,6 +99,24 @@ jobs:
           & $exe.FullName
           if ($LASTEXITCODE -ne 0) { throw "The tests failed with exit code $LASTEXITCODE" }
 
+      # NativeAOT needs the MSVC linker. windows-latest ships Visual Studio with the C++ workload, but
+      # link.exe is not on PATH until vswhere's installation is added, so surface the toolchain first.
+      - name: Prepare the native toolchain
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($vsPath) {
+              Write-Host "Visual Studio with C++ tools: $vsPath"
+              Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:ProgramFiles "Microsoft Visual Studio\Installer")
+            } else {
+              Write-Host "::warning::No Visual Studio installation with the C++ workload was found"
+            }
+          } else {
+            Write-Host "::warning::vswhere.exe was not found"
+          }
+
       - name: Publish (NativeAOT)
         shell: pwsh
         run: |
@@ -116,7 +134,19 @@ jobs:
             /p:Version=$version `
             /p:AssemblyVersion=$version `
             /p:FileVersion=$version
-          if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) {
+            # Re-run with verbose output captured, and surface the interesting lines as annotations so the
+            # failure is diagnosable without downloading the raw log.
+            $log = 'publish.log'
+            dotnet publish $project -c Release -r win-x64 /p:PublishProfile=$profile /p:Version=$version -v:n *>&1 |
+              Tee-Object -FilePath $log | Out-Host
+
+            Select-String -Path $log -Pattern 'error|link\.exe|MSB|ILC|LNK' |
+              Select-Object -First 25 |
+              ForEach-Object { Write-Host "::error::$($_.Line.Trim())" }
+
+            throw "dotnet publish failed with exit code $LASTEXITCODE"
+          }
 
       # A silent downgrade to a managed IL build (a few hundred KB) is a known AOT pitfall; the Indexer then
       # fails with "No valid plugin library was found.", but checking the size first gives a readable error.
