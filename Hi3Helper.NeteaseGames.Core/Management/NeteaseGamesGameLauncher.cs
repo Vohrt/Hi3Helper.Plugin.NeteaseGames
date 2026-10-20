@@ -72,9 +72,9 @@ public static class NeteaseGamesGameLauncher
     /// <summary>
     ///     Prepares an installation for a direct start.
     ///     <para>
-    ///         The official launcher does not stage a copy of the game executable; it starts the executable of
-    ///         the installation itself. The only thing it writes is the channel tag of the installation, so the
-    ///         plugin does that as well when it is missing.
+    ///         Nothing has to be prepared: the official launcher does not stage a copy of the game executable
+    ///         either, it starts the executable of the installation itself. The state of the patch directory
+    ///         belongs to the game itself - a directly started game rewrites its version and check files.
     ///     </para>
     /// </summary>
     /// <param name="gameDirectory">The root of the game installation.</param>
@@ -85,24 +85,6 @@ public static class NeteaseGamesGameLauncher
         if (!File.Exists(executable))
         {
             throw new FileNotFoundException("The game executable could not be found.", executable);
-        }
-
-        if (string.IsNullOrEmpty(channelTag))
-        {
-            return;
-        }
-
-        string cpsTag = Path.Combine(gameDirectory, NeteaseGamesPaths.CpsTagRelativePath);
-        try
-        {
-            if (!File.Exists(cpsTag))
-            {
-                File.WriteAllBytes(cpsTag, NeteaseGamesCrypto.EncryptCpsTag(channelTag));
-            }
-        }
-        catch (Exception)
-        {
-            // The channel tag is optional - the game works without it.
         }
     }
 
