@@ -230,6 +230,22 @@ public static class NeteaseGamesSession
     public const string SessionFileName = "session.json";
 
     /// <summary>
+    ///     The UniSDK application key of the game (found in the game process).
+    /// </summary>
+    public const string UniSdkAppKey = "B91xFDWsRsEu41otp8JR7Clt03QCpjhI";
+
+    /// <summary>
+    ///     The UniSDK project of the game (the directory the SDK stores its data in).
+    /// </summary>
+    public const string UniSdkProject = "ywzh";
+
+    /// <summary>
+    ///     The name of the file that lists the UniSDK modules that may be loaded
+    ///     (<c>&lt;dll&gt;&amp;&lt;version&gt;</c> per line, base64 encoded).
+    /// </summary>
+    public const string UniSdkWhitelistFileName = "unisdk_dll_load_whitelist";
+
+    /// <summary>
     ///     The directory the plugin keeps its own files in.
     /// </summary>
     public static string SessionDirectory => Path.Combine(
