@@ -270,4 +270,4 @@ jobs:
           else
             git commit -m "Publish auto-update files"
           fi
-          git push origin HEAD:release --force
+          git push origin HEAD:release --force 2>&1
