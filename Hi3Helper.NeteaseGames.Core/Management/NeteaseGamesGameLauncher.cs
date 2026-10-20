@@ -40,6 +40,11 @@ public static class NeteaseGamesGameLauncher
     public static readonly TimeSpan WindowTimeout = TimeSpan.FromMinutes(3);
 
     /// <summary>
+    ///     How long the exit awaiter waits for a game that has not appeared yet before giving up.
+    /// </summary>
+    public static readonly TimeSpan GameAppearTimeout = TimeSpan.FromMinutes(1);
+
+    /// <summary>
     ///     Quotes the arguments that contain a semicolon, otherwise the Windows command line parser would cut
     ///     them in half (the <c>--python-args=innerdesktop;script_mode#RELEASE_MODE</c> argument).
     /// </summary>
@@ -118,31 +123,44 @@ public static class NeteaseGamesGameLauncher
     }
 
     /// <summary>
-    ///     Checks whether a process belongs to an installation (by executable path, or by user name as a
-    ///     fallback when the path cannot be read because the process is elevated).
+    ///     Checks whether a process belongs to an installation.
+    ///     <para>
+    ///         Matching is done by executable path. When the path cannot be read (which is the normal case for
+    ///         an elevated game started from a non elevated host) the process only counts as ours when its
+    ///         executable <b>name</b> matches the game and no other installation claims it - the game process
+    ///         names are specific enough (<c>ywzh</c> / <c>ywzh_</c>) and a false negative would be worse than
+    ///         the alternative, because the host would report the game as stopped while it is running.
+    ///     </para>
     /// </summary>
     private static bool BelongsToInstallation(Process process, string gameRoot, string binariesDirectory)
     {
         try
         {
             string? path = process.MainModule?.FileName;
-            if (string.IsNullOrEmpty(path))
+            if (!string.IsNullOrEmpty(path))
             {
-                return false;
+                string fullPath = Path.GetFullPath(path);
+                return IsUnder(fullPath, gameRoot) || IsUnder(fullPath, binariesDirectory);
             }
-
-            string fullPath = Path.GetFullPath(path);
-            return IsUnder(fullPath, gameRoot) || IsUnder(fullPath, binariesDirectory);
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException
                                        or NotSupportedException)
         {
-            // The executable of an elevated process cannot be inspected from a non elevated host. The name
-            // check above already matched, so the process is assumed to be ours - it is only reported as
-            // "running", never killed on that basis alone (see KillRunningGame).
-            return process.ProcessName.Contains("ywzh", StringComparison.OrdinalIgnoreCase);
+            // The executable of an elevated process cannot be inspected from a non elevated host.
         }
+
+        // Fall back to the process name only (see the remarks above).
+        return IsGameProcessName(process.ProcessName);
     }
+
+    /// <summary>
+    ///     Whether a process name belongs to the game (the bootstrapper and the real client).
+    /// </summary>
+    /// <param name="processName">The process name without extension.</param>
+    public static bool IsGameProcessName(string processName)
+        => string.Equals(processName, "ywzh", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(processName, Path.GetFileNameWithoutExtension(NeteaseGamesPaths.StagedGameExecutableName),
+               StringComparison.OrdinalIgnoreCase);
 
     private static bool IsUnder(string path, string root)
     {
@@ -355,7 +373,14 @@ public static class NeteaseGamesGameLauncher
     }
 
     /// <summary>
-    ///     Waits until the game is running.
+    ///     Waits until the running game exits.
+    ///     <para>
+    ///         ⚠ This awaiter means "wait until the game <b>exits</b>", not "wait until it starts". The host
+    ///         awaits it as the process awaiter of a session that has already started:
+    ///         <c>await ProcessAwaiter(token)</c> followed by "GAME STOPPED". Returning as soon as the process
+    ///         is seen made the host believe the game had ended immediately, so it re-detected the still running
+    ///         game and looped through GAME STARTED / GAME STOPPED every few milliseconds.
+    ///     </para>
     /// </summary>
     public static async Task<bool> WaitRunningGame(GameManagerExtension.RunGameFromGameManagerContext context,
         CancellationToken token)
@@ -365,16 +390,38 @@ public static class NeteaseGamesGameLauncher
             return false;
         }
 
+        // Give a freshly started game a moment to appear, then wait for it to disappear. The grace period
+        // covers the hand over from the bootstrapper (ywzh.exe) to the real client (ywzh_.exe).
+        DateTime deadline = DateTime.UtcNow + GameAppearTimeout;
+        while (!token.IsCancellationRequested && !IsRunning(gamePath))
+        {
+            if (DateTime.UtcNow > deadline)
+            {
+                // Nothing started: there is nothing to wait for.
+                return false;
+            }
+
+            try
+            {
+                await Task.Delay(500, token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+        }
+
+        // Now wait until every game process is gone.
         while (!token.IsCancellationRequested)
         {
-            if (IsRunning(gamePath))
+            if (!IsRunning(gamePath))
             {
                 return true;
             }
 
             try
             {
-                await Task.Delay(500, token).ConfigureAwait(false);
+                await Task.Delay(1000, token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
