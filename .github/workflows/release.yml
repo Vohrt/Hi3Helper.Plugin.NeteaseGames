@@ -59,7 +59,7 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
           name: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
-          prerelease: ${{ github.event.inputs.prerelease != false }}
+          prerelease: ${{ github.event_name == 'push' || github.event.inputs.prerelease == 'true' }}
           files: |
             Hi3Helper.Plugin.NeteaseGames/publish/Release/*.zip
           fail_on_unmatched_files: true
