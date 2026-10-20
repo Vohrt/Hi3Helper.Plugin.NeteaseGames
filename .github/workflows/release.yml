@@ -250,6 +250,9 @@ jobs:
             echo "staged $short"
           done
 
+          # Only the per-game directories belong on this branch: the downloaded artifacts are build inputs.
+          rm -rf artifacts
+
           git add -A
           git commit -m "Publish auto-update files for ${{ github.ref_name }}" 2>/dev/null || echo "nothing to commit"
           git push origin HEAD:release --force
