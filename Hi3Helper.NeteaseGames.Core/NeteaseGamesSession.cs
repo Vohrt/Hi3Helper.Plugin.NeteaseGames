@@ -267,6 +267,30 @@ public static class NeteaseGamesSession
 
         /// <summary>The slot of the login in the virtual table of the interface.</summary>
         public const int LoginSlot = 0x80;
+
+        /// <summary>
+        ///     The slot the plain C entry <c>__EP_Login</c> uses (the account login, in contrast to
+        ///     <see cref="LoginSlot" /> which is the Steam integration).
+        /// </summary>
+        public const int AccountLoginSlot = 0x58;
+
+        /// <summary>
+        ///     The properties the login expects (the names are the ones the SDK uses internally).
+        /// </summary>
+        public static readonly string[] UniSdkLoginProperties =
+        [
+            "enable_2fa",
+            "support_2FA",
+            "is_cloud_game",
+            "login_start",
+            "login_start_base",
+            "height",
+            "width",
+            "screen_resoultion",
+            "screen_size",
+            "screen",
+            "memory_total_format"
+        ];
     }
 
     /// <summary>
