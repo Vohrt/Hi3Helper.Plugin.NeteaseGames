@@ -246,6 +246,30 @@ public static class NeteaseGamesSession
     public const string UniSdkWhitelistFileName = "unisdk_dll_load_whitelist";
 
     /// <summary>
+    ///     The entry points of the UniSDK that the game itself uses (see the import table of the game).
+    /// </summary>
+    public static class UniSdkInitExport
+    {
+        /// <summary>The pre initialization of the SDK (configuration and context).</summary>
+        public const string PreInit = "?preInit@SdkMgr@NtUniSDK@@SAXPEBD@Z";
+
+        /// <summary>The command line the SDK reads.</summary>
+        public const string SetCommandLine = "?setCmdLineParameter@SdkMgr@NtUniSDK@@SAXPEBD@Z";
+
+        /// <summary>The initialization of the SDK (configuration and context).</summary>
+        public const string Init = "?init@SDKManager@NtUniSDK@@SA_NPEBD0@Z";
+
+        /// <summary>The interface the game uses (the virtual table holds the login).</summary>
+        public const string GetInstance = "?getInst@SdkMgr@NtUniSDK@@SAPEAVINtUniSdkGamerInterface@2@XZ";
+
+        /// <summary>The slot of the initialization in the virtual table of the interface.</summary>
+        public const int InitSlot = 0x78;
+
+        /// <summary>The slot of the login in the virtual table of the interface.</summary>
+        public const int LoginSlot = 0x80;
+    }
+
+    /// <summary>
     ///     The directory the plugin keeps its own files in.
     /// </summary>
     public static string SessionDirectory => Path.Combine(
