@@ -121,7 +121,7 @@ jobs:
         shell: pwsh
         run: |
           $version = '${{ github.event.inputs.version }}'
-          if ([string]::IsNullOrWhiteSpace($version)) { $version = ${{ github.ref_name }}.TrimStart('v') }
+          if ([string]::IsNullOrWhiteSpace($version)) { $version = '${{ github.ref_name }}'.TrimStart('v') }
 
           $profile = '${{ github.event.inputs.publish_profile }}'
           if ([string]::IsNullOrWhiteSpace($profile)) { $profile = 'ReleasePublish-O2' }
