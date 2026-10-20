@@ -1,5 +1,7 @@
 name: Release
 
+# Every game is published as its own plugin (own assembly + own zip), so a user only downloads the game they
+# play. Add a new game by adding a preset project and one entry to the matrix below.
 on:
   push:
     tags:
@@ -7,9 +9,17 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish (e.g. 0.0.1)'
+        description: 'Version to publish (e.g. 0.1.0)'
         required: true
-        default: '0.0.1'
+        default: '0.1.0'
+      game:
+        description: 'Game plugin to build (SoR = Sea of Remnants, or "all")'
+        required: true
+        default: 'all'
+      publish_profile:
+        description: 'Publish profile (ReleasePublish-O2 = size, ReleasePublish-O6 = speed)'
+        required: true
+        default: 'ReleasePublish-O2'
       prerelease:
         description: 'Publish as pre-release'
         type: boolean
@@ -19,9 +29,37 @@ permissions:
   contents: write
 
 jobs:
+  prepare:
+    name: Resolve games
+    runs-on: ubuntu-latest
+    outputs:
+      games: ${{ steps.set.outputs.games }}
+    steps:
+      - id: set
+        shell: bash
+        run: |
+          # One entry per shipped game plugin. The key is the assembly name (= the short game id).
+          ALL='[{"short":"SoR","project":"Hi3Helper.Plugin.SoR","name":"Sea of Remnants"}]'
+          REQUESTED='${{ github.event.inputs.game }}'
+          if [ -z "$REQUESTED" ] || [ "$REQUESTED" = "all" ]; then
+            echo "games=$ALL" >> "$GITHUB_OUTPUT"
+          else
+            FILTERED=$(echo "$ALL" | jq -c --arg s "$REQUESTED" '[.[] | select(.short == $s)]')
+            if [ "$FILTERED" = "[]" ]; then
+              echo "::error::Unknown game '$REQUESTED' (known: $(echo "$ALL" | jq -r '.[].short' | paste -sd, -))"
+              exit 1
+            fi
+            echo "games=$FILTERED" >> "$GITHUB_OUTPUT"
+          fi
+
   release:
     name: Build and publish
+    needs: prepare
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        game: ${{ fromJson(needs.prepare.outputs.games) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,25 +72,87 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # A leftover publish directory from a previous run is how two versions of the same plugin ended up in
+      # one release: the publish step appends to it and the upload glob picks both zips up.
+      - name: Clean publish directory
+        shell: pwsh
+        run: |
+          $publish = '${{ matrix.game.project }}\publish'
+          if (Test-Path $publish) { Remove-Item $publish -Recurse -Force }
+          Write-Host "Publish directory is clean"
+
+      - name: Unit tests
+        if: matrix.game.short == 'SoR'
+        shell: pwsh
+        run: dotnet test Hi3Helper.NeteaseGames.Tests\Hi3Helper.NeteaseGames.Tests.csproj -c Release --logger "console;verbosity=normal"
+
       - name: Publish (NativeAOT)
         shell: pwsh
         run: |
           $version = '${{ github.event.inputs.version }}'
-          if ([string]::IsNullOrWhiteSpace($version)) { $version = '${{ github.ref_name }}'.TrimStart('v') }
-          Write-Host "Publishing version $version"
-          dotnet publish Hi3Helper.Plugin.NeteaseGames\Hi3Helper.Plugin.NeteaseGames.csproj `
+          if ([string]::IsNullOrWhiteSpace($version)) { $version = ${{ github.ref_name }}.TrimStart('v') }
+
+          $profile = '${{ github.event.inputs.publish_profile }}'
+          if ([string]::IsNullOrWhiteSpace($profile)) { $profile = 'ReleasePublish-O2' }
+
+          $project = '${{ matrix.game.project }}\${{ matrix.game.project }}.csproj'
+          Write-Host "Publishing $($project) version $version with $profile"
+          dotnet publish $project `
             -c Release -r win-x64 `
-            /p:PublishProfile=ReleasePublish-O2 `
+            /p:PublishProfile=$profile `
             /p:Version=$version `
             /p:AssemblyVersion=$version `
             /p:FileVersion=$version
+          if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
+
+      # A silent downgrade to a managed IL build (a few hundred KB) is a known AOT pitfall; the Indexer then
+      # fails with "No valid plugin library was found.", but checking the size first gives a readable error.
+      - name: Verify the native output
+        shell: pwsh
+        run: |
+          $dir = '${{ matrix.game.project }}\publish\Release'
+          $dll = Join-Path $dir '${{ matrix.game.short }}.dll'
+          if (-not (Test-Path $dll)) { throw "The published library is missing: $dll" }
+
+          $size = (Get-Item $dll).Length
+          Write-Host "$($dll): $size bytes"
+          if ($size -lt 2MB) { throw "The output looks like a managed build ($size bytes) - NativeAOT was downgraded" }
+
+          $pdb = @(Get-ChildItem $dir -Filter *.pdb -ErrorAction SilentlyContinue)
+          if ($pdb.Count -gt 0) { throw "The publish directory still contains symbols: $($pdb.Name -join ', ')" }
 
       - name: Build manifest and package
         shell: pwsh
         run: |
-          $publish = 'Hi3Helper.Plugin.NeteaseGames\publish\Release'
+          $publish = '${{ matrix.game.project }}\publish\Release'
           & '.\tools\Indexer.exe' $publish
+          if ($LASTEXITCODE -ne 0) { throw "Indexer failed with exit code $LASTEXITCODE" }
+
+          $zips = @(Get-ChildItem $publish -Filter *.zip)
+          if ($zips.Count -ne 1) { throw "Expected exactly one package, found $($zips.Count)" }
           Get-ChildItem $publish | Select-Object Name, Length
+
+      - name: Upload the package as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ matrix.game.short }}
+          path: |
+            ${{ matrix.game.project }}/publish/Release/*.zip
+            ${{ matrix.game.project }}/publish/Release/manifest.json
+            ${{ matrix.game.project }}/publish/Release/${{ matrix.game.short }}.dll
+
+  publish-release:
+    name: Publish release
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all plugin packages
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List packages
+        run: find artifacts -type f | sort
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -60,6 +160,50 @@ jobs:
           tag_name: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
           name: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
           prerelease: ${{ github.event_name == 'push' || github.event.inputs.prerelease == 'true' }}
+          # One zip per game (plus its manifest), so users download only the game they play.
           files: |
-            Hi3Helper.Plugin.NeteaseGames/publish/Release/*.zip
+            artifacts/**/*.zip
+            artifacts/**/manifest.json
           fail_on_unmatched_files: true
+
+  publish-cdn:
+    name: Publish auto-update files
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all plugin packages
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # The plugin self updater pulls <cdn>/<SHORT>/manifest.json + <SHORT>/<SHORT>.dll, one directory per game.
+      - name: Push to the release branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin release 2>/dev/null || true
+          if git rev-parse --verify --quiet origin/release >/dev/null; then
+            git checkout -B release origin/release
+          else
+            git checkout --orphan release
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          for dir in artifacts/plugin-*; do
+            short="${dir#artifacts/plugin-}"
+            mkdir -p "$short"
+            cp "$dir/manifest.json" "$short/manifest.json"
+            cp "$dir/$short.dll" "$short/$short.dll"
+            echo "staged $short"
+          done
+
+          git add -A
+          git commit -m "Publish auto-update files for ${{ github.ref_name }}" 2>/dev/null || echo "nothing to commit"
+          git push origin HEAD:release --force
