@@ -75,11 +75,11 @@ public partial class SeaOfRemnantsCnPresetConfig : PluginPresetConfigBase
 
     public override string ProfileName => "SeaOfRemnants";
 
-    public override string ZoneDescription => "NetEase · CN";
+    public override string ZoneDescription => "NetEase · 中国大陆";
 
-    public override string ZoneName => "遗忘之海";
+    public override string ZoneName => "中国大陆";
 
-    public override string ZoneFullName => "遗忘之海 (Sea of Remnants)";
+    public override string ZoneFullName => "遗忘之海 (中国大陆)";
 
     public override string ZoneLogoUrl => "https://h74.update.netease.com/game_notice/image/095541248827.png";
 
