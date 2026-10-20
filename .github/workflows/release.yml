@@ -226,53 +226,50 @@ jobs:
           path: artifacts
 
       # The plugin self updater pulls <cdn>/<SHORT>/manifest.json + <SHORT>/<SHORT>.dll, one directory per game.
+      # The auto-update branch holds one directory per game: <SHORT>/manifest.json + <SHORT>/<SHORT>.dll.
+      # It is rebuilt in a separate worktree so the checked out master tree never has to be switched, and only
+      # the per-game directories are written (a failed run cannot damage the other games' entries).
       - name: Push to the release branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           echo "=== downloaded artifacts ==="
           find artifacts -type f | sort
 
-          # Start from the current release branch so the other games' directories survive.
-          # The checkout action leaves the master tree in the working directory; switching branches needs it
-          # to be discarded first, otherwise git refuses to overwrite the tracked files.
-          if git fetch origin release 2>/dev/null && git rev-parse --verify --quiet origin/release >/dev/null; then
-            echo "=== updating the existing release branch"
-            git reset --hard 2>&1 || true
-            git clean -xfd -e artifacts 2>&1 || true
-            git checkout -B release origin/release 2>&1 || { echo "::error::checkout of the release branch failed"; exit 1; }
+          work="$RUNNER_TEMP/release-branch"
+          rm -rf "$work"
+          if git ls-remote --exit-code --heads origin release >/dev/null 2>&1; then
+            echo "=== cloning the existing release branch"
+            git clone --branch release --depth 1 "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$work"
           else
-            echo "=== creating the release branch"
-            git checkout --orphan release 2>&1 || { echo "::error::orphan checkout failed"; exit 1; }
-            git reset --hard 2>&1 || true
-            git clean -xfd -e artifacts 2>&1 || true
+            echo "=== creating a new release branch"
+            mkdir -p "$work"
+            git -C "$work" init -q
+            git -C "$work" remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           fi
 
+          git -C "$work" config user.name  "github-actions[bot]"
+          git -C "$work" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           for dir in artifacts/plugin-*; do
             short="${dir#artifacts/plugin-}"
-            echo "=== staging $short from $dir"
-            mkdir -p "$short"
-            cp "$dir/manifest.json" "$short/manifest.json"
-            cp "$dir/$short.dll" "$short/$short.dll"
+            echo "=== staging $short"
+            mkdir -p "$work/$short"
+            cp "$dir/manifest.json" "$work/$short/manifest.json"
+            cp "$dir/$short.dll" "$work/$short/$short.dll"
+            git -C "$work" add --force -- "$short"
           done
 
-          # The downloaded artifacts are build inputs, not branch content: only the per-game directories are
-          # staged (an unconditional `git add -A` would also pick up whatever the checkout left behind).
-          for dir in artifacts/plugin-*; do
-            short="${dir#artifacts/plugin-}"
-            git add --force -- "$short"
-          done
+          echo "=== files on the branch"
+          git -C "$work" status --short
 
-          echo "=== staged"
-          git diff --cached --name-status
-
-          if git diff --cached --quiet; then
+          if git -C "$work" diff --cached --quiet && git -C "$work" rev-parse --verify --quiet HEAD >/dev/null; then
             echo "nothing to commit"
           else
-            git commit -m "Publish auto-update files"
+            git -C "$work" commit -q -m "Publish auto-update files"
           fi
-          git push origin HEAD:release --force 2>&1 || { echo "::error::push failed (see output above)"; exit 1; }
+
+          git -C "$work" push origin HEAD:release --force
+          echo "=== pushed"
