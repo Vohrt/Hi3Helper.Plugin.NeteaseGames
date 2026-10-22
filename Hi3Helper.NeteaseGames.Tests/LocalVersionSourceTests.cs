@@ -138,3 +138,101 @@ public class LocalVersionSourceTests
         }
     }
 }
+
+/// <summary>
+///     Two version numbers live side by side in an installation and they are NOT interchangeable:
+///     <c>pkgversion</c> holds the base package / client version (the fourth field of <c>gameversion</c>) while
+///     the fourth line of <c>patchmd5</c> holds the patch version (the fifth field). The official launcher
+///     decides whether an update is needed from the patch version, so reading <c>pkgversion</c> made the plugin
+///     report a permanent update after every launcher run.
+/// </summary>
+public class PatchVersionDimensionTests
+{
+    /// <summary>Builds an installation whose pkgversion and patchmd5 disagree, like a launcher-managed one.</summary>
+    private static string CreateInstallation(long pkgVersion, long patchVersion, bool enveloped = true)
+    {
+        string root = Path.Combine(AppContext.BaseDirectory, "dim-" + Guid.NewGuid().ToString("N"));
+        string patchDirectory = Path.Combine(root, NeteaseGamesPaths.PatchDirectoryRelativePath);
+        Directory.CreateDirectory(patchDirectory);
+
+        File.WriteAllText(Path.Combine(patchDirectory, NeteaseGamesPaths.PackageVersionFileName),
+            pkgVersion.ToString());
+
+        string record = $"20261022122731826\n16867045629764259494\n0\n{patchVersion}\n" +
+                        $"{{\"@metadata@\":{{\"@private_res_version@\":{patchVersion}}}}}";
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(record);
+        File.WriteAllBytes(Path.Combine(patchDirectory, NeteaseGamesPaths.PatchMd5FileName),
+            enveloped ? NeteaseGamesCrypto.EncryptHexEnvelope(bytes) : bytes);
+
+        return root;
+    }
+
+    private static void Cleanup(string root)
+    {
+        try
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+        catch (IOException)
+        {
+            // Harmless leftover.
+        }
+    }
+
+    [Fact]
+    public void PatchVersion_ComesFromPatchMd5_NotPkgVersion()
+    {
+        // The exact shape the official launcher leaves behind: pkgversion 6521279 (base package) while the patch
+        // version is 6582435.
+        string root = CreateInstallation(pkgVersion: 6521279, patchVersion: 6582435);
+        try
+        {
+            NeteaseGamesLocalState state = NeteaseGamesLocalState.Read(root);
+
+            Assert.Equal(6582435, state.PatchVersion);
+            // The base package version is still reported, it is just not the patch version.
+            Assert.Equal(6521279, state.PackageVersion);
+        }
+        finally
+        {
+            Cleanup(root);
+        }
+    }
+
+    [Fact]
+    public void PatchVersion_ReadsAPlainPatchMd5Too()
+    {
+        // A copy taken straight from the content host is plain text, not enveloped.
+        string root = CreateInstallation(pkgVersion: 6521279, patchVersion: 6582435, enveloped: false);
+        try
+        {
+            Assert.Equal(6582435, NeteaseGamesLocalState.Read(root).PatchVersion);
+        }
+        finally
+        {
+            Cleanup(root);
+        }
+    }
+
+    [Fact]
+    public void PatchVersion_FallsBackToPkgVersionWithoutPatchMd5()
+    {
+        string root = Path.Combine(AppContext.BaseDirectory, "dim-" + Guid.NewGuid().ToString("N"));
+        string patchDirectory = Path.Combine(root, NeteaseGamesPaths.PatchDirectoryRelativePath);
+        Directory.CreateDirectory(patchDirectory);
+        try
+        {
+            File.WriteAllText(Path.Combine(patchDirectory, NeteaseGamesPaths.PackageVersionFileName), "6521279");
+
+            // No patchmd5 at all: the only number available is the base package version.
+            Assert.Equal(6521279, NeteaseGamesLocalState.Read(root).PatchVersion);
+        }
+        finally
+        {
+            Cleanup(root);
+        }
+    }
+}

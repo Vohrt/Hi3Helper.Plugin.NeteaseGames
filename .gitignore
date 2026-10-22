@@ -16,3 +16,7 @@ TestResults/
 ## OS
 Thumbs.db
 desktop.ini
+
+# Probe artifacts (ETL captures can reach hundreds of MB)
+tools/probe-output/
+*.etl

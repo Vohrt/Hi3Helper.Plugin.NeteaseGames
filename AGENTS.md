@@ -45,13 +45,21 @@ Collapse Launcher 的网易游戏插件。**一个发行商 Core + 每游戏一�
 
 - **远端**权威版本 = `@metadata@.@private_res_version@`（= 文本第 4 行），**不是**
   `normal.latest_pkgversion`（后者是别的分支的陈旧值，5282637 vs 真实 6534552 ⇒ 会误报永久有更新）。
-- **本地**权威版本 = `LocalData\Patch\pkgversion`，因为它是**插件更新时写入的提交点**。
+- **两个版本号是不同维度，绝不能混用**：
+  `pkgversion`（6521279）= **基础包/客户端版本**（`gameversion` 第 4 段）；
+  `patchmd5` 第 4 行（6582435）= **补丁版本**（`gameversion` 第 5 段）。
+  **官方判断"要不要更新"用的是补丁版本**，所以本地版本必须读 `patchmd5` 第 4 行，
+  `pkgversion` 只作回退。曾经让 `pkgversion` 优先 ⇒ 每次官方启动器跑完就误报永久更新。
 - **官方启动器的记账是 `patchmd5_windows64_normal.txt` 的第 4 行**（= `@private_res_version@`），
   不是 `pkgversion`。更新成功后**必须同步重写**这个文件（`NeteaseGamesLocalState.WriteLauncherRecord`），
   否则官方启动器不认插件装的更新。
 - `gameversion` / `versiondata.json` / `patchmd5` 都是**游戏客户端或官方启动器写的**，插件更新不会自动刷新
   它们 ⇒ 只能作回退来源，且更新后应一并刷新（best effort）。
-- **完整逆向记录见 `docs/re/launcher-version-logic.md`**（四行结构、`MLauncher.check`、历史 bug 三连）。
+- **完整逆向记录见 `docs/re/launcher-version-logic.md`**（四行结构、`MLauncher.check`、历史 bug 三连）
+  与 **`docs/re/launcher-live-observation.md`**（2026-10-22 实测：基础包可下载、两个版本维度、
+  远端清单会滞后）。
+- **远端 patchlist 会滞后于官方实际下发的包**（实测 `Patch1000.mpk` 磁盘 15,767,230 vs 远端 13,283,727）
+  ⇒ `Update` 判定必须用「本地清单记录的包大小 vs 磁盘实际大小」，**不要**依赖远端哈希。
 
 ## 安全约定
 
@@ -94,11 +102,14 @@ tools\Indexer.exe Hi3Helper.Plugin.SoR\publish\Release
 | `Repair` | 已装游戏点“安装”/修复 | 对账**磁盘**：本地清单认为当前的分片，只校验存在与大小，缺/截断才补 |
 
 - `Repair` **不追新版本**：追新是 `Update` 的职责。两者在“本机已落后”时会给出相同结果，属正常。
-- **全新安装不可行**（已实测确认）：基础包 `Patch.mpk` / `Patch1-123.mpk` / `ResourceExA*.mpk`
-  = **123 个 / 59.10 GB**，占完整安装的 92%。内容服务器对它们**所有 section 都返回 404**，
-  任何清单也不描述它们，mini-pack 只有 1.3 GB（装不下）。⇒ `Install` 检测到缺失即抛
-  `NotSupportedException`，绝不能让宿主报告“安装完成”而游戏起不来。
-  详见 `docs/re/launcher-install-logic.md`。
+- **全新安装目前不可行，但原因已修正**：2026-10-22 实测发现官方启动器**确实下载了基础包**
+  （`Patch8` / `Patch115` / `Patch117` / `Patch119` / `Patch121-127` / `ResourceExA10/13/14/15`，
+  约 2.4 GB）。⇒ 不是“包不存在”，而是**下载通道未定位**：静态穷举
+  `mpk_script`/`mpk_indep`/`mpk_medium`/`bigpatch`/`base`/`full` 等 section 全部 404，
+  观测到的临时文件名是 `tmp_file\com.temp.orbit\<hash>-big_common_Char_726[-1--1].tmp`
+  （bigpatch 通道，按资源组切块）。
+  ⇒ `Install` 仍检测到缺失就抛 `NotSupportedException`，但**不要再宣称"包不可下载"**。
+  详见 `docs/re/launcher-live-observation.md`。
 - 三者的 `TotalSize` 必须与 `GetGameDownloadedSizeAsync` 同源，否则宿主算错剩余空间。
 
 ## 尚未完成（改动前必读）

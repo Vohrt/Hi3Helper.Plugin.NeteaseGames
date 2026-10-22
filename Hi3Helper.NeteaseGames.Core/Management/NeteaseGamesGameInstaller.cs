@@ -369,30 +369,46 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
 
             foreach ((string name, NeteaseGamesPackageEntry remotePackage) in remote.Packages)
             {
-                bool upToDate = hasLocalList &&
-                                local.Packages.TryGetValue(name, out NeteaseGamesPackageEntry? localPackage) &&
-                                localPackage is not null &&
-                                NeteaseGamesPatchList.HashesEqual(localPackage.Hashes, remotePackage.Hashes);
+                string packagePath = Path.Combine(gamePath, NeteaseGamesPaths.PatchDirectoryRelativePath, name);
+                bool existsOnDisk = File.Exists(packagePath);
+                long diskSize = existsOnDisk ? new FileInfo(packagePath).Length : -1;
+
+                bool localKnows = hasLocalList && local.Packages.ContainsKey(name);
+                NeteaseGamesPackageEntry? localPackage = localKnows ? local.Packages[name] : null;
+                bool localCurrent = localPackage is not null &&
+                                    NeteaseGamesPatchList.HashesEqual(localPackage.Hashes, remotePackage.Hashes);
+
+                // The local patch list is written by the official launcher and is kept in step with the packages it
+                // installed, while the remote list can lag behind: after a launcher run the on-disk packages
+                // matched the local list (Patch1000.mpk 15,767,230 bytes) but the remote list still announced the
+                // previous size (13,283,727), which produced an "update" of nine packages that were already
+                // current.
+                //
+                // A package is therefore considered done when the local list knows it AND the file on disk has the
+                // size that list records. Only packages the local list does not know, or whose file no longer
+                // matches it, are downloaded.
+                if (mode == NeteaseGamesPlanMode.Update && localPackage is not null && existsOnDisk &&
+                    diskSize == localPackage.TotalSize)
+                {
+                    continue;
+                }
 
                 if (mode == NeteaseGamesPlanMode.Repair)
                 {
                     // A repair restores the recorded state; it does not upgrade. A package the local list calls
-                    // current is only checked for presence and size, and one it does not know is the update's
+                    // current only has to be present with the recorded size; one it does not know is the update's
                     // business.
-                    if (hasLocalList && !local.Packages.ContainsKey(name))
+                    if (localKnows)
+                    {
+                        if (existsOnDisk && localPackage is not null && diskSize == localPackage.TotalSize)
+                        {
+                            continue;
+                        }
+                    }
+                    else if (IsLocalFileComplete(packagePath, remotePackage.TotalSize, verifyHash: false))
                     {
                         continue;
                     }
-
-                    string knownPath = Path.Combine(gamePath, NeteaseGamesPaths.PatchDirectoryRelativePath, name);
-                    if (IsLocalFileComplete(knownPath, remotePackage.TotalSize, verifyHash: false))
-                    {
-                        continue;
-                    }
-                }
-                else if (mode == NeteaseGamesPlanMode.Update && upToDate)
-                {
-                    continue;
                 }
 
                 plan.Items.Add(new NeteaseGamesDownloadItem

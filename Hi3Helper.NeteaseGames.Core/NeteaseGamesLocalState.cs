@@ -191,10 +191,16 @@ public sealed class NeteaseGamesLocalState
 
         long packageVersion = ReadInt(Path.Combine(patchDirectory, NeteaseGamesPaths.PackageVersionFileName));
 
-        // `pkgversion` is the commit point the plugin writes when an update completed, so it is the primary
-        // source. The launcher's own record (the fourth line of patchmd5) is used when it is missing, and the
-        // client's files are the last resort.
-        long patchVersion = packageVersion > 0 ? packageVersion : 0;
+        // Two different versions live side by side and they are NOT interchangeable:
+        //
+        //   pkgversion         6521279   the base package / client version (4th field of `gameversion`)
+        //   patchmd5 line 4    6582435   the patch version (5th field of `gameversion`)
+        //
+        // The official launcher decides whether an update is needed by comparing the patch version against
+        // @private_res_version@, so `patchmd5` is the primary source here. `pkgversion` is only a fallback for
+        // installations that never ran the launcher, and it must not be preferred: after a launcher run it holds
+        // 6521279 while the patch version is 6582435, which made the plugin report a permanent update.
+        long patchVersion = 0;
         string engineVersion = ReadText(Path.Combine(gameDirectory, NeteaseGamesPaths.BuiltVersionRelativePath));
         string latestEngineVersion = ReadText(Path.Combine(patchDirectory, NeteaseGamesPaths.LatestEngineVersionFileName));
         string gameVersionToken = ReadText(Path.Combine(patchDirectory, NeteaseGamesPaths.GameVersionFileName));
@@ -207,22 +213,32 @@ public sealed class NeteaseGamesLocalState
         {
             try
             {
-                byte[] plain = NeteaseGamesCrypto.DecryptHexEnvelope(File.ReadAllBytes(patchMd5File));
-                string text = System.Text.Encoding.UTF8.GetString(plain);
+                byte[] raw = File.ReadAllBytes(patchMd5File);
 
-                if (patchVersion <= 0)
+                // The launcher stores the file inside the HEX_ envelope; a copy taken straight from the content
+                // host is plain text. Both shapes occur on disk.
+                byte[] plain = NeteaseGamesCrypto.IsHexEnvelope(raw)
+                    ? NeteaseGamesCrypto.DecryptHexEnvelope(raw)
+                    : raw;
+
+                string text = System.Text.Encoding.UTF8.GetString(plain);
+                long recorded = ReadPatchMd5Version(text);
+                if (recorded > 0)
                 {
-                    long recorded = ReadPatchMd5Version(text);
-                    if (recorded > 0)
-                    {
-                        patchVersion = recorded;
-                    }
+                    patchVersion = recorded;
                 }
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException or FormatException)
             {
                 // A broken patchmd5 file must not prevent the rest of the state from being read.
             }
+        }
+
+        // `pkgversion` is the base package version, not the patch version, so it is only a last resort for the
+        // patch version (an installation that has neither a patchmd5 nor versiondata).
+        if (patchVersion <= 0 && packageVersion > 0)
+        {
+            patchVersion = packageVersion;
         }
 
         // versiondata.json is written by the game client, not by the plugin, so it goes stale as soon as an
