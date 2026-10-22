@@ -16,7 +16,7 @@ Collapse Launcher 的网易游戏插件。**一个发行商 Core + 每游戏一�
 
 1. **更新必须"全成功才写 `pkgversion`"**。`pkgversion` 是整套更新的**提交点**；任何一个对象失败都要
    抛异常而不是写版本号——否则 Collapse 显示"已最新"，而游戏缺文件。
-2. **落盘顺序：包 → 索引 → 松散文件 → 版本号**。游戏通过 `.mpkinfo` 索引读包，包新索引旧 = 读到错位数据。
+2. **落盘顺序：分片 → 索引 → 版本号**。游戏通过 `.mpkinfo` 索引读包，包新索引旧 = 读到错位数据。
 3. **同一个 `NeteaseGamesDownloadPlan` 必须同时供给** `GetGameSize` / `GetGameDownloadedSize` / 进度回调。
    宿主用 `size - downloaded` 算剩余空间与剩余量（`PluginGameInstallWrapper.cs:637`），三个来源不一致就会
    算错：报小了下到一半满盘，报大了拒绝更新。
@@ -76,9 +76,29 @@ tools\Indexer.exe Hi3Helper.Plugin.SoR\publish\Release
 - Release 配置已关符号：publish 目录**不应**出现 `*.pdb`（出现即是陈旧中间产物，先 `dotnet clean`）。
 - 发布包应有且仅有一个 zip；CI 会强制检查（数量、DLL 体积、无 PDB）。
 
+## 三种计划模式（`NeteaseGamesPlanMode`）
+
+`BuildPlanAsync` 按用途构建计划，语义**不要混淆**：
+
+| 模式 | 触发 | 计划内容 |
+|---|---|---|
+| `Update` | 宿主“更新”按钮 | 与本地 patchlist 比对，只下**变更的分片/索引** |
+| `Install` | 目录里没有游戏 | **全部分片 + 索引 + 引擎载荷**（0 → 完整安装） |
+| `Repair` | 已装游戏点“安装”/修复 | 对账**磁盘**：本地清单认为当前的分片，只校验存在与大小，缺/截断才补 |
+
+- `Repair` **不追新版本**：追新是 `Update` 的职责。两者在“本机已落后”时会给出相同结果，属正常。
+- 三者的 `TotalSize` 必须与 `GetGameDownloadedSizeAsync` 同源，否则宿主算错剩余空间。
+
 ## 尚未完成（改动前必读）
 
-1. **松散文件增量下载未实现**：`patchlist` 的 `common`/`windows64_common` 变更项（真实更新里就有 9 个）
-   与 `mpkexclude`（778 条）目前无法下载 → 实现里**主动拒绝**把更新标记为完成。
-2. **全新安装（0 → 78 GB）不可用**：需要官方启动器装过一次本体。
-3. 引擎载荷只按**大小**校验（网易 64 位 hash 算法未定位）。
+1. **引擎载荷只按大小校验**（网易 64 位 hash 算法未定位）。
+2. 社交图标 / Logo 叠加 / 视频背景未做（参考 PW 与 Hypergryph 的实现）。
+3. 进度粒度只到“文件数”，未细到当前阶段/当前文件。
+
+> ⚠️ **曾经的错误结论（已纠正，别再犯）**：`patchlist` 的 `common`/`windows64_common` 段有 231,619 条
+> “松散文件”，一度被当成需要逐个下载的文件，导致计划里塞进 23 万项、Update 误报 1 GB、Repair 误报 60 GB。
+> **它们不是磁盘文件**，而是引擎内部虚拟资源路径（`Char/…`、`Sounds/…`、`VA/…`），内容全部存在
+> 186 个 `.mpk` 分片里。实测抽样 2000 条，磁盘上 **0 条存在**。因此：
+> - 不需要、也不可能“下载松散文件”；
+> - 真正的增量只有 **mpk 分片 + 索引**；
+> - `mpkexclude`（778 条）同样是虚拟路径，不是待下载清单。

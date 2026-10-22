@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -220,6 +221,15 @@ public sealed class NeteaseGamesDownloadPlan
 /// </summary>
 public sealed class NeteaseGamesDownloader
 {
+    /// <summary>How many transfers may overlap by default.</summary>
+    public const int DefaultParallelism = 4;
+
+    /// <summary>The size of the copy buffer.</summary>
+    private const int BufferSize = 1024 * 1024;
+
+    /// <summary>How often a single object is attempted per content host before it is given up.</summary>
+    private const int AttemptsPerHost = 2;
+
     private readonly HttpClient _httpClient;
     private readonly List<string> _contentRoots;
 
@@ -292,46 +302,64 @@ public sealed class NeteaseGamesDownloader
         Exception? lastError = null;
         foreach (Uri uri in BuildUris(item.RelativePath))
         {
-            token.ThrowIfCancellationRequested();
-
-            // A retry always starts from whatever is on disk at that moment; a corrupt or partly written
-            // file is dropped first, otherwise the next attempt would append to garbage.
-            if (File.Exists(item.StagedPath))
+            for (int attempt = 1; attempt <= AttemptsPerHost; attempt++)
             {
-                long current = new FileInfo(item.StagedPath).Length;
-                if (item.ExpectedSize > 0 && current > item.ExpectedSize)
+                token.ThrowIfCancellationRequested();
+
+                // A retry always starts from whatever is on disk at that moment; a corrupt or partly written
+                // file is dropped first, otherwise the next attempt would append to garbage.
+                if (File.Exists(item.StagedPath))
                 {
-                    DeleteStaged(item);
-                    current = 0;
+                    long current = new FileInfo(item.StagedPath).Length;
+                    if (item.ExpectedSize > 0 && current > item.ExpectedSize)
+                    {
+                        DeleteStaged(item);
+                        current = 0;
+                    }
+
+                    alreadyDownloaded = current;
                 }
 
-                alreadyDownloaded = current;
-            }
-
-            try
-            {
-                (bool ok, bool corrupt) = await DownloadFromAsync(uri, item, alreadyDownloaded, progress, token)
-                    .ConfigureAwait(false);
-                if (ok)
+                try
                 {
-                    return true;
+                    (bool ok, bool corrupt) = await DownloadFromAsync(uri, item, alreadyDownloaded, progress, token)
+                        .ConfigureAwait(false);
+                    if (ok)
+                    {
+                        return true;
+                    }
+
+                    if (corrupt)
+                    {
+                        DeleteStaged(item);
+                        alreadyDownloaded = 0;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex) when (ex is HttpRequestException or IOException)
+                {
+                    lastError = ex;
+                    SharedStatic.InstanceLogger?.LogWarning(
+                        "[NeteaseGames] Download failed for {Uri} (attempt {Attempt}/{Attempts}): {Msg}",
+                        uri, attempt, AttemptsPerHost, ex.Message);
                 }
 
-                if (corrupt)
+                if (attempt < AttemptsPerHost)
                 {
-                    DeleteStaged(item);
-                    alreadyDownloaded = 0;
+                    // Exponential backoff: a busy edge recovers within a second or two.
+                    TimeSpan delay = TimeSpan.FromMilliseconds(400 * (1 << (attempt - 1)));
+                    try
+                    {
+                        await Task.Delay(delay, token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex) when (ex is HttpRequestException or IOException)
-            {
-                lastError = ex;
-                SharedStatic.InstanceLogger?.LogWarning(
-                    "[NeteaseGames] Download failed for {Uri}: {Msg}", uri, ex.Message);
             }
         }
 
@@ -415,16 +443,25 @@ public sealed class NeteaseGamesDownloader
             append ? FileMode.Append : FileMode.Create,
             FileAccess.Write,
             FileShare.None,
-            bufferSize: 1024 * 1024,
+            bufferSize: BufferSize,
             useAsync: true);
 
-        byte[] buffer = new byte[1024 * 1024];
-        int read;
-        while ((read = await source.ReadAsync(buffer, token).ConfigureAwait(false)) > 0)
+        // The buffer is rented: a content package is up to 800 MB, and allocating a fresh megabyte per file
+        // (or per retry) puts avoidable pressure on the large object heap.
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+        try
         {
-            await target.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
-            written += read;
-            progress?.Invoke(written);
+            int read;
+            while ((read = await source.ReadAsync(buffer.AsMemory(0, BufferSize), token).ConfigureAwait(false)) > 0)
+            {
+                await target.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
+                written += read;
+                progress?.Invoke(written);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
 
         await target.FlushAsync(token).ConfigureAwait(false);
@@ -452,6 +489,113 @@ public sealed class NeteaseGamesDownloader
         }
 
         return (true, false);
+    }
+
+    /// <summary>
+    ///     Downloads every object of a plan concurrently, reporting the total number of bytes on disk.
+    ///     <para>
+    ///         A game payload is tens of gigabytes across hundreds of objects, so the transfers are overlapped.
+    ///         The reported progress is the sum over all objects (it never goes backwards because each object
+    ///         only grows), which is exactly what the host expects from a single byte counter.
+    ///     </para>
+    /// </summary>
+    /// <param name="items">The objects to download.</param>
+    /// <param name="parallelism">How many transfers may run at the same time.</param>
+    /// <param name="progress">Reports the total number of bytes that are on disk.</param>
+    /// <param name="token">Cancel token.</param>
+    /// <returns>The objects that could not be downloaded (empty on success).</returns>
+    public async Task<IReadOnlyList<NeteaseGamesDownloadItem>> DownloadAllAsync(
+        IReadOnlyList<NeteaseGamesDownloadItem> items,
+        int parallelism,
+        Action<long>? progress,
+        CancellationToken token)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+
+        List<NeteaseGamesDownloadItem> failed = [];
+        if (items.Count == 0)
+        {
+            return failed;
+        }
+
+        // Per object byte counters: the total is their sum, so an object that already had bytes on disk from a
+        // previous run is accounted for from the start.
+        long[] perItem = new long[items.Count];
+        for (int i = 0; i < items.Count; i++)
+        {
+            perItem[i] = GetExistingLength(items[i].StagedPath);
+        }
+
+        long total = 0;
+        foreach (long value in perItem)
+        {
+            total += value;
+        }
+
+        progress?.Invoke(total);
+
+        object gate = new();
+        long reported = total;
+
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, items.Count),
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = Math.Max(1, parallelism),
+                CancellationToken = token
+            },
+            async (index, innerToken) =>
+            {
+                NeteaseGamesDownloadItem item = items[index];
+
+                // Each object reports its own running total; the shared counter is advanced by the delta.
+                long itemStart = perItem[index];
+                bool ok = await DownloadAsync(
+                        item,
+                        bytes =>
+                        {
+                            long delta = bytes - itemStart;
+                            if (delta <= 0)
+                            {
+                                return;
+                            }
+
+                            itemStart = bytes;
+                            long current;
+                            lock (gate)
+                            {
+                                reported += delta;
+                                current = reported;
+                            }
+
+                            progress?.Invoke(current);
+                        },
+                        innerToken)
+                    .ConfigureAwait(false);
+
+                if (!ok)
+                {
+                    lock (gate)
+                    {
+                        failed.Add(item);
+                    }
+                }
+            }).ConfigureAwait(false);
+
+        return failed;
+    }
+
+    /// <summary>Returns the length of a file, or 0 when it does not exist.</summary>
+    private static long GetExistingLength(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? new FileInfo(path).Length : 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return 0;
+        }
     }
 
     /// <summary>Computes the MD5 of a file.</summary>

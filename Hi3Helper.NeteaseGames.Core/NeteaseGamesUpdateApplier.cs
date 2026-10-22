@@ -59,23 +59,25 @@ public static class NeteaseGamesUpdateApplier
             "[NeteaseGames] Applying patch: {Packages} packages, {Indexes} indexes, {Loose} loose files, {Size} bytes",
             plan.PackageCount, plan.IndexCount, plan.LooseCount, plan.TotalSize);
 
-        // Download everything first. A failure here leaves the installation untouched.
-        foreach (NeteaseGamesDownloadItem item in plan.Items)
+        // Download everything first. A failure here leaves the installation untouched. The transfers are
+        // overlapped: a fresh installation is tens of gigabytes and a serial loop would take much longer.
+        IReadOnlyList<NeteaseGamesDownloadItem> failed = await downloader
+            .DownloadAllAsync(plan.Items, NeteaseGamesDownloader.DefaultParallelism, progress, token)
+            .ConfigureAwait(false);
+
+        if (failed.Count > 0)
         {
-            token.ThrowIfCancellationRequested();
-
-            long start = plan.DownloadedSize;
-            bool ok = await downloader
-                .DownloadAsync(item, bytes => progress?.Invoke(start + bytes), token)
-                .ConfigureAwait(false);
-
-            if (!ok)
+            foreach (NeteaseGamesDownloadItem item in failed)
             {
                 SharedStatic.InstanceLogger?.LogError(
                     "[NeteaseGames] Could not download '{Path}', the patch is cancelled", item.RelativePath);
-                return NeteaseGamesApplyResult.DownloadFailed(item.RelativePath);
             }
 
+            return NeteaseGamesApplyResult.DownloadFailed(failed[0].RelativePath);
+        }
+
+        foreach (NeteaseGamesDownloadItem item in plan.Items)
+        {
             plan.ReportDownloaded(item.ExpectedSize);
         }
 
