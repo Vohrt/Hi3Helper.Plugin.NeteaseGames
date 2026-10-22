@@ -35,6 +35,7 @@ public partial class NeteaseGamesGameManager : GameManagerBase
     private readonly HttpClient _httpClient;
     private NeteaseGamesMiniPackManifest? _remoteManifest;
     private NeteaseGamesPatchManifest? _remotePatchManifest;
+    private string? _remotePatchManifestText;
     private long _remotePackageVersion;
     private bool _remoteProbed;
     private bool _hasEngineUpdate;
@@ -106,6 +107,24 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             lock (_syncRoot)
             {
                 return _remotePatchManifest;
+            }
+        }
+    }
+
+    /// <summary>
+    ///     The verbatim (decrypted) text of the remote patch manifest.
+    ///     <para>
+    ///         The official launcher keeps this file as its own record of the installed version, so it is stored
+    ///         here and written back after a successful update.
+    ///     </para>
+    /// </summary>
+    public string? RemotePatchManifestText
+    {
+        get
+        {
+            lock (_syncRoot)
+            {
+                return _remotePatchManifestText;
             }
         }
     }
@@ -352,6 +371,10 @@ public partial class NeteaseGamesGameManager : GameManagerBase
         lock (_syncRoot)
         {
             _remotePatchManifest = manifest;
+
+            // Keep the verbatim manifest: it becomes the launcher's own record once an update succeeds (the
+            // official launcher stores this file as-is and compares its fourth line).
+            _remotePatchManifestText = text;
         }
 
         if (manifest.LatestPackageVersion > 0)

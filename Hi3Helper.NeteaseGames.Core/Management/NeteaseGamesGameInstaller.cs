@@ -278,7 +278,9 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         NeteaseGamesDownloadPlan plan = new()
         {
             StagingDirectory = stagingDirectory,
-            PackageVersion = manager.RemotePackageVersion
+            PackageVersion = manager.RemotePackageVersion,
+            // The launcher's own record is rebuilt from this manifest once the update succeeded.
+            LauncherRecord = manager.RemotePatchManifestText
         };
 
         // A fresh install has nothing to compare against; an update and a repair both use the local patch list

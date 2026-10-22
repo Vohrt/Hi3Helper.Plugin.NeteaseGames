@@ -153,6 +153,13 @@ public static class NeteaseGamesUpdateApplier
                     "[NeteaseGames] Could not write the package version: {Msg}", ex.Message);
                 return NeteaseGamesApplyResult.ApplyFailed(NeteaseGamesPaths.PackageVersionFileName);
             }
+
+            // The official launcher does not look at `pkgversion`: its record is `patchmd5_*.txt`, a verbatim
+            // copy of the remote OB_patchmd5 whose fourth line carries the installed @private_res_version@.
+            // Leaving that file at the previous version made the launcher (and our own reader) believe the update
+            // had not happened. It is rewritten from the manifest that was just installed.
+            NeteaseGamesLocalState.WriteLauncherRecord(patchDirectory, plan.PackageVersion, plan.LauncherRecord,
+                gameDirectory);
         }
 
         plan.CleanStaging();

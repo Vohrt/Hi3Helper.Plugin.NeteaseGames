@@ -102,6 +102,16 @@ public sealed class NeteaseGamesDownloadPlan
     /// <summary>The package version the installation is updated to, or 0 when the version must not change.</summary>
     public long PackageVersion { get; init; }
 
+    /// <summary>
+    ///     The decrypted remote patch manifest (<c>OB_patchmd5_*.txt</c>) the plan was built from.
+    ///     <para>
+    ///         It is written back as the launcher's own record once the update succeeded, with its version fields
+    ///         replaced by <see cref="PackageVersion"/> - the official launcher reads that file, not
+    ///         <c>pkgversion</c>.
+    ///     </para>
+    /// </summary>
+    public string? LauncherRecord { get; init; }
+
     /// <summary>The staging directory every object is downloaded into.</summary>
     public string StagingDirectory { get; init; } = string.Empty;
 

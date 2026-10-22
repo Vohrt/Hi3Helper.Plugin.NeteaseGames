@@ -3,6 +3,8 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO;
 using System.Text.Json;
+using Hi3Helper.Plugin.Core;
+using Microsoft.Extensions.Logging;
 using Microsoft.Win32;
 
 namespace Hi3Helper.NeteaseGames.Core;
@@ -165,6 +167,21 @@ public sealed class NeteaseGamesLocalState
 
     /// <summary>
     ///     Reads the local state from a game installation directory.
+    ///     <para>
+    ///         <b>Version sources, in the order the official launcher uses them.</b>
+    ///     </para>
+    ///     <para>
+    ///         The official launcher keeps its record in <c>patchmd5_windows64_normal.txt</c>: the file is a
+    ///         verbatim copy of the remote <c>OB_patchmd5_*.txt</c> whose fourth line is the installed
+    ///         <c>@private_res_version@</c>. Everything else in the installation (<c>gameversion</c>,
+    ///         <c>Documents\versiondata.json</c>) is written by the <i>game client</i>, so it only advances when
+    ///         the client itself ran - never when a launcher installed an update.
+    ///     </para>
+    ///     <para>
+    ///         This is why the version is read from the sources the launcher maintains first and the client's
+    ///         files last: reading a client file after a plugin update reported the previous version, so the
+    ///         host kept offering the update it had just installed.
+    ///     </para>
     /// </summary>
     /// <param name="gameDirectory">The root of the game installation.</param>
     public static NeteaseGamesLocalState Read(string gameDirectory)
@@ -174,36 +191,31 @@ public sealed class NeteaseGamesLocalState
 
         long packageVersion = ReadInt(Path.Combine(patchDirectory, NeteaseGamesPaths.PackageVersionFileName));
 
-        // `pkgversion` is the file the plugin writes as the commit point of an update, so it is the authority on
-        // what is installed. The other two sources are written by the game client and go stale after a plugin
-        // update; they are only used when `pkgversion` is missing.
-        long patchVersion = packageVersion;
+        // `pkgversion` is the commit point the plugin writes when an update completed, so it is the primary
+        // source. The launcher's own record (the fourth line of patchmd5) is used when it is missing, and the
+        // client's files are the last resort.
+        long patchVersion = packageVersion > 0 ? packageVersion : 0;
         string engineVersion = ReadText(Path.Combine(gameDirectory, NeteaseGamesPaths.BuiltVersionRelativePath));
         string latestEngineVersion = ReadText(Path.Combine(patchDirectory, NeteaseGamesPaths.LatestEngineVersionFileName));
         string gameVersionToken = ReadText(Path.Combine(patchDirectory, NeteaseGamesPaths.GameVersionFileName));
         string shaderVersion = string.Empty;
 
-        // The local patchmd5 file announces the newest patch version the client knows about. It is not refreshed
-        // by a plugin update, so it may only fill in when `pkgversion` is unreadable.
+        // The launcher's own record: a verbatim copy of the remote patchmd5, whose fourth line is the installed
+        // @private_res_version@ and whose @metadata@ block repeats it.
         string patchMd5File = Path.Combine(patchDirectory, NeteaseGamesPaths.PatchMd5FileName);
-        if (patchVersion <= 0 && File.Exists(patchMd5File))
+        if (File.Exists(patchMd5File))
         {
             try
             {
                 byte[] plain = NeteaseGamesCrypto.DecryptHexEnvelope(File.ReadAllBytes(patchMd5File));
                 string text = System.Text.Encoding.UTF8.GetString(plain);
-                int index = text.IndexOf("\"latest_pkgversion\"", StringComparison.Ordinal);
-                if (index >= 0)
+
+                if (patchVersion <= 0)
                 {
-                    int colon = text.IndexOf(':', index);
-                    int end = text.IndexOfAny(['}', ',', '\n'], colon + 1);
-                    if (colon > 0 && end > colon)
+                    long recorded = ReadPatchMd5Version(text);
+                    if (recorded > 0)
                     {
-                        string value = text[(colon + 1)..end].Trim().Trim('"');
-                        if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long parsed))
-                        {
-                            patchVersion = parsed;
-                        }
+                        patchVersion = recorded;
                     }
                 }
             }
@@ -213,10 +225,9 @@ public sealed class NeteaseGamesLocalState
             }
         }
 
-        // versiondata.json is written by the game client, not by the plugin, so it goes stale as soon as the
-        // plugin installs an update: it kept reporting the version from before the update and the host then
-        // offered the same update forever. It is therefore only a fallback for the values the plugin cannot
-        // read from the patch directory itself.
+        // versiondata.json is written by the game client, not by the plugin, so it goes stale as soon as an
+        // update is installed without the client running. It only fills in what has no other source (the engine
+        // and shader versions) and the version counters as a last resort.
         string versionDataFile = Path.Combine(documentsDirectory, "versiondata.json");
         if (File.Exists(versionDataFile))
         {
@@ -435,6 +446,268 @@ public sealed class NeteaseGamesLocalState
 
         value = 0;
         return false;
+    }
+
+    /// <summary>
+    ///     Reads the installed version from the decrypted text of a <c>patchmd5</c> file.
+    ///     <para>
+    ///         The file is a verbatim copy of the remote <c>OB_patchmd5_*.txt</c>, whose layout is four lines
+    ///         followed by the JSON body:
+    ///     </para>
+    ///     <code>
+    ///         20261022122731826          <- sync timestamp (17 digits)
+    ///         16867045629764259494       <- patch list hash
+    ///         0
+    ///         6582435                    <- @private_res_version@ = the installed version
+    ///         { "normal": { ... }, "@metadata@": { ... } }
+    ///     </code>
+    ///     <para>
+    ///         The fourth line is what the official launcher compares against the remote manifest, so it is read
+    ///         first; the <c>@private_res_version@</c> of the embedded metadata block is used as a fallback for
+    ///         files that were written without the line prefix.
+    ///     </para>
+    /// </summary>
+    /// <param name="text">The decrypted text of a patchmd5 file.</param>
+    /// <returns>The installed version, or 0 when it cannot be read.</returns>
+    public static long ReadPatchMd5Version(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return 0;
+        }
+
+        // The four header lines come before the JSON body.
+        int bodyStart = text.IndexOf('{');
+        string header = bodyStart >= 0 ? text[..bodyStart] : text;
+
+        string[] lines = header.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length >= 4 &&
+            long.TryParse(lines[3].Trim('"'), NumberStyles.Integer, CultureInfo.InvariantCulture, out long version) &&
+            version > 0)
+        {
+            return version;
+        }
+
+        // Fallback: the metadata block repeats the same value.
+        if (bodyStart >= 0)
+        {
+            int index = text.IndexOf("\"@private_res_version@\"", bodyStart, StringComparison.Ordinal);
+            if (index >= 0)
+            {
+                int colon = text.IndexOf(':', index);
+                int end = text.IndexOfAny([',', '}', '\n'], colon + 1);
+                if (colon > 0 && end > colon)
+                {
+                    string value = text[(colon + 1)..end].Trim().Trim('"');
+                    if (long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long parsed) &&
+                        parsed > 0)
+                    {
+                        return parsed;
+                    }
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    ///     Writes the launcher's own version record after a successful update.
+    ///     <para>
+    ///         The official launcher stores <c>patchmd5_windows64_normal.txt</c> as a verbatim copy of the remote
+    ///         <c>OB_patchmd5_*.txt</c>: four header lines (sync timestamp, patch list hash, <c>0</c>, installed
+    ///         version) followed by the JSON body. Its fourth line is what the launcher compares against the
+    ///         remote manifest, so a launcher that finds the previous value there believes the update never
+    ///         happened - which is exactly the state a plugin update used to leave behind.
+    ///     </para>
+    ///     <para>
+    ///         The record is only written when the caller supplies the manifest that was installed; without it
+    ///         the file is left untouched rather than being replaced with a fabricated one.
+    ///     </para>
+    /// </summary>
+    /// <param name="patchDirectory">The <c>LocalData\Patch</c> directory of the installation.</param>
+    /// <param name="version">The version that was installed.</param>
+    /// <param name="manifest">The remote manifest the installation was brought to (may be null).</param>
+    /// <param name="gameDirectory">The root of the installation (used for the client's own files).</param>
+    public static void WriteLauncherRecord(string patchDirectory, long version, string? manifest, string gameDirectory)
+    {
+        if (version <= 0)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(manifest))
+        {
+            try
+            {
+                string record = BuildLauncherRecord(manifest, version);
+                string path = Path.Combine(patchDirectory, NeteaseGamesPaths.PatchMd5FileName);
+                byte[] encrypted = NeteaseGamesCrypto.EncryptHexEnvelope(System.Text.Encoding.UTF8.GetBytes(record));
+                File.WriteAllBytes(path, encrypted);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+            {
+                // A failed record write must not fail the update itself: `pkgversion` is already committed and
+                // the version reader falls back to it.
+                SharedStatic.InstanceLogger?.LogWarning(
+                    "[NeteaseGames] Could not refresh the launcher record: {Msg}", ex.Message);
+            }
+        }
+
+        // The client's own files are refreshed as well so that the game, the official launcher and this plugin
+        // all report the same version. They are best effort: the game rewrites them on its next start.
+        RefreshClientVersionFiles(patchDirectory, version, manifest, gameDirectory);
+    }
+
+    /// <summary>
+    ///     Rebuilds the launcher record with the installed version in its fourth line, keeping the rest of the
+    ///     manifest intact.
+    /// </summary>
+    /// <param name="manifest">The remote manifest (decrypted text).</param>
+    /// <param name="version">The installed version.</param>
+    public static string BuildLauncherRecord(string manifest, long version)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(manifest);
+
+        int bodyStart = manifest.IndexOf('{');
+        string body = bodyStart >= 0 ? manifest[bodyStart..] : manifest;
+        string header = bodyStart >= 0 ? manifest[..bodyStart] : string.Empty;
+
+        // Keep the manifest's own hash line when it is present; only the sync timestamp and the version change.
+        string hash = "0";
+        string[] lines = header.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length >= 2)
+        {
+            hash = lines[1];
+        }
+
+        // A timestamp in the same shape the launcher writes (yyyyMMddHHmmssfff).
+        string stamp = DateTime.Now.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture);
+
+        // The body carries the version twice: in @metadata@ and (for completeness) in the normal block. Both are
+        // replaced so a reader that consults either field agrees.
+        body = ReplaceJsonNumber(body, "\"@private_res_version@\"", version);
+        body = ReplaceJsonNumber(body, "\"@private_patch_version@\"", version);
+        body = ReplaceJsonNumber(body, "\"@private_script_version@\"", version);
+
+        return $"{stamp}\n{hash}\n0\n{version}\n{body}";
+    }
+
+    /// <summary>Replaces the number of a JSON property, leaving the text untouched when it is absent.</summary>
+    private static string ReplaceJsonNumber(string json, string property, long value)
+    {
+        int index = json.IndexOf(property, StringComparison.Ordinal);
+        if (index < 0)
+        {
+            return json;
+        }
+
+        int colon = json.IndexOf(':', index);
+        if (colon < 0)
+        {
+            return json;
+        }
+
+        int start = colon + 1;
+        while (start < json.Length && char.IsWhiteSpace(json[start]))
+        {
+            start++;
+        }
+
+        int end = start;
+        while (end < json.Length && (char.IsDigit(json[end]) || json[end] == '-'))
+        {
+            end++;
+        }
+
+        if (end == start)
+        {
+            return json;
+        }
+
+        return string.Concat(json.AsSpan(0, start), value.ToString(CultureInfo.InvariantCulture), json.AsSpan(end));
+    }
+
+    /// <summary>
+    ///     Refreshes the version files the game client maintains, so every consumer agrees on the version.
+    /// </summary>
+    /// <param name="patchDirectory">The <c>LocalData\Patch</c> directory.</param>
+    /// <param name="version">The installed version.</param>
+    /// <param name="manifest">The installed manifest (may be null).</param>
+    /// <param name="gameDirectory">The root of the installation.</param>
+    private static void RefreshClientVersionFiles(string patchDirectory, long version, string? manifest,
+        string gameDirectory)
+    {
+        try
+        {
+            // `gameversion` is <channel>_<platform>_<hash>_<packageVersion>_<patchVersion>; only the last field
+            // is ours to update.
+            string gameVersionPath = Path.Combine(patchDirectory, NeteaseGamesPaths.GameVersionFileName);
+            string gameVersion = ReadText(gameVersionPath);
+            if (!string.IsNullOrEmpty(gameVersion))
+            {
+                int lastSeparator = gameVersion.LastIndexOf('_');
+                if (lastSeparator > 0)
+                {
+                    string updated = string.Concat(gameVersion.AsSpan(0, lastSeparator + 1),
+                        version.ToString(CultureInfo.InvariantCulture));
+                    File.WriteAllText(gameVersionPath, updated);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Best effort only.
+        }
+
+        try
+        {
+            string versionDataPath = Path.Combine(gameDirectory, NeteaseGamesPaths.DocumentsRelativePath,
+                "versiondata.json");
+            if (!File.Exists(versionDataPath))
+            {
+                return;
+            }
+
+            string json = File.ReadAllText(versionDataPath);
+            json = ReplaceJsonNumber(json, "\"package_version\"", version);
+            json = ReplaceJsonString(json, "\"patch_version\"", version.ToString(CultureInfo.InvariantCulture));
+            File.WriteAllText(versionDataPath, json);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Best effort only.
+        }
+    }
+
+    /// <summary>Replaces the string value of a JSON property, leaving the text untouched when it is absent.</summary>
+    private static string ReplaceJsonString(string json, string property, string value)
+    {
+        int index = json.IndexOf(property, StringComparison.Ordinal);
+        if (index < 0)
+        {
+            return json;
+        }
+
+        int colon = json.IndexOf(':', index);
+        if (colon < 0)
+        {
+            return json;
+        }
+
+        int open = json.IndexOf('"', colon + 1);
+        if (open < 0)
+        {
+            return json;
+        }
+
+        int close = json.IndexOf('"', open + 1);
+        if (close < 0)
+        {
+            return json;
+        }
+
+        return string.Concat(json.AsSpan(0, open + 1), value, json.AsSpan(close));
     }
 
     private static string ReadText(string path)

@@ -46,9 +46,12 @@ Collapse Launcher 的网易游戏插件。**一个发行商 Core + 每游戏一�
 - **远端**权威版本 = `@metadata@.@private_res_version@`（= 文本第 4 行），**不是**
   `normal.latest_pkgversion`（后者是别的分支的陈旧值，5282637 vs 真实 6534552 ⇒ 会误报永久有更新）。
 - **本地**权威版本 = `LocalData\Patch\pkgversion`，因为它是**插件更新时写入的提交点**。
-  `Documents\versiondata.json`（`patch_version`）和 `patchmd5`（`latest_pkgversion`）都是**游戏客户端写的**，
-  插件更新不会刷新它们 ⇒ 只作回退。曾经让 `versiondata.json` 优先，导致更新装完后仍提示需要更新、
-  无法开始游戏（`pkgversion` 已 6582435，而 `versiondata.json` 还是 6534552）。
+- **官方启动器的记账是 `patchmd5_windows64_normal.txt` 的第 4 行**（= `@private_res_version@`），
+  不是 `pkgversion`。更新成功后**必须同步重写**这个文件（`NeteaseGamesLocalState.WriteLauncherRecord`），
+  否则官方启动器不认插件装的更新。
+- `gameversion` / `versiondata.json` / `patchmd5` 都是**游戏客户端或官方启动器写的**，插件更新不会自动刷新
+  它们 ⇒ 只能作回退来源，且更新后应一并刷新（best effort）。
+- **完整逆向记录见 `docs/re/launcher-version-logic.md`**（四行结构、`MLauncher.check`、历史 bug 三连）。
 
 ## 安全约定
 

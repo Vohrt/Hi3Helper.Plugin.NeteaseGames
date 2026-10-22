@@ -47,6 +47,42 @@ public static class NeteaseGamesCrypto
         return Inflate(XorKey(DecodeBase64Body(file[HexEnvelopeMagic.Length..])));
     }
 
+    /// <summary>
+    ///     Encrypts a plaintext into a HEX_ manifest envelope (the exact inverse of
+    ///     <see cref="DecryptHexEnvelope"/>).
+    ///     <para>
+    ///         This is needed to write the launcher's own record (<c>patchmd5_*.txt</c>) after an update: the
+    ///         official launcher keeps that file as a verbatim copy of the remote manifest, so it has to be
+    ///         re-created with the version that was just installed.
+    ///     </para>
+    /// </summary>
+    /// <param name="plaintext">The content to encrypt.</param>
+    public static byte[] EncryptHexEnvelope(ReadOnlySpan<byte> plaintext)
+    {
+        byte[] compressed = Deflate(plaintext);
+        byte[] xored = XorKey(compressed);
+        string base64 = Convert.ToBase64String(xored);
+
+        byte[] magic = HexEnvelopeMagic.ToArray();
+        byte[] body = Encoding.ASCII.GetBytes(base64);
+        byte[] result = new byte[magic.Length + body.Length];
+        magic.CopyTo(result, 0);
+        body.CopyTo(result, magic.Length);
+        return result;
+    }
+
+    /// <summary>Deflates a plaintext into a zlib stream.</summary>
+    private static byte[] Deflate(ReadOnlySpan<byte> plaintext)
+    {
+        using MemoryStream output = new();
+        using (ZLibStream zlib = new(output, CompressionLevel.Optimal, leaveOpen: true))
+        {
+            zlib.Write(plaintext);
+        }
+
+        return output.ToArray();
+    }
+
     /// <summary>Decodes a base64 body, tolerating line breaks and a missing padding.</summary>
     private static byte[] DecodeBase64Body(ReadOnlySpan<byte> body)
     {
