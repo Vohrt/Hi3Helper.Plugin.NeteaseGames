@@ -9,7 +9,7 @@ Collapse Launcher 的**网易游戏**插件仓库：**一个发行商 Core + 每
 
 | 游戏 | 程序集 / 短名 | 工程 | 状态 |
 |---|---|---|---|
-| 《遗忘之海》/ Sea of Remnants | **`SoR.dll`** | `Hi3Helper.Plugin.SoR` | 启动 / 版本 / 公告 / 更新 / 修复 / 全新安装 |
+| 《遗忘之海》/ Sea of Remnants | **`SoR.dll`** | `Hi3Helper.Plugin.SoR` | 启动 / 版本 / 更新 / 修复 / 公告 |
 
 新增一款网易游戏 = 新增一个 preset 工程（`Hi3Helper.Plugin.<短名>`，`AssemblyName=<短名>`）+ 在
 `release.yml` 的 `prepare` 步骤里加一行。Core 不动。
@@ -19,33 +19,34 @@ Collapse Launcher 的**网易游戏**插件仓库：**一个发行商 Core + 每
 ```
 Hi3Helper.NeteaseGames.Core/   发行商 Core（程序集 NeteaseGames.Core，协议/下载/启动/媒体）
 Hi3Helper.Plugin.SoR/          薄插件：Sea of Remnants（程序集 SoR.dll，导出 TryGetApiExport）
-Hi3Helper.NeteaseGames.Tests/  单元测试（解析器 / 签名器 / 路径安全 / 计划模型 / 背景资源）
+Hi3Helper.NeteaseGames.Tests/  单元测试（解析器 / 签名器 / 路径安全 / 计划模型）
 Hi3Helper.Plugin.Core/         Collapse 上游 ABI（子模块）
 tools/Indexer.exe              生成插件 manifest 与发布包
-docs/re/netease-re.md          逆向与协议笔记（唯一参考）
-docs/FIX-LOG-2026-10-20.md     上一轮全量整改记录
+docs/re/netease-protocol.md    协议（唯一参考，只写实测结论）
 ```
 
-## 当前状态（诚实版）
+## 当前状态
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| 检测安装 | ✅ 已验证 | 注册表 `OB_ywzh_launcher_PC` 的 `AdditionalPaths`（`InstPath` 含零宽空格，需清洗） |
-| 本地版本 | ✅ 已验证 | `pkgversion` / `patchmd5` / `versiondata.json` |
-| 远端版本（有无更新） | ✅ 已修 | 权威字段是 `@metadata@.@private_res_version@`，**不是** `normal.latest_pkgversion` |
-| 直接启动（不经官方启动器） | ✅ **真机验证** | 见 `docs/re/netease-re.md` §1 |
-| 背景 / 图标 | ✅ 已修 | 主视觉与图标**内嵌**；以 base64 交给宿主（本地路径会导致无限转圈） |
-| 公告 / 轮播 | ✅ 已修 | 逐条抓取公告 JSON 取真实标题与 1920×1080 轮播图（6 小时磁盘缓存） |
-| 插件自更新 | ✅ | `cl-plugins.sakurakoi.top/SoR/` |
-| **增量更新** | ✅ 已实现 | 分片/索引粒度，与官方一致（`Char/…` 等是虚拟路径，**不是**磁盘文件） |
-| **修复（Repair）** | ✅ 已实现 | 对账磁盘：分片/索引按大小校验，缺失或截断才补 |
-| **社交侧栏** | ✅ 已实现 | 8 个官方渠道（微信/哔哩哔哩/抖音/小红书/QQ 群/大神…），带二维码图与跳转 |
-| 视频背景 | ⛔ 不适用 | 游戏与启动器都**没有任何视频资源**（仅 Splash.bmp 静态图） |
-| **全新安装（0 → 全量）** | ⛔ 不可行（已确认） | 基础包 `Patch*.mpk`（59 GB / 123 个）内容服务器**全部 404**，只能由官方启动器首装 |
-| 下载并发 / 重试 | ✅ | 4 路并行、`ArrayPool` 缓冲、每主机 2 次指数退避重试 |
+| 检测安装 | ✅ 已验证 | 注册表 `OB_ywzh_launcher_PC` 的 `AdditionalPaths` |
+| 本地版本 | ✅ 已验证 | `patchmd5` **第 3 行**（补丁版本）；`pkgversion` 是基础包版本，另一维度 |
+| 远端版本 / 更新判定 | ✅ 已验证 | 远端清单**第 3 行**；判定 =「远端包大小 vs 磁盘大小」 |
+| 下载目录 | ✅ 已验证 | 远端清单**第 0 行**；**不是** `@metadata@.@base_version@`（实测差 9 个包） |
+| 直接启动（不经官方启动器） | ✅ 真机验证 | 见 `docs/re/netease-protocol.md` |
+| 背景 / 图标 | ✅ 已修 | 内嵌 base64（本地路径会让宿主无限转圈） |
+| 公告 / 轮播 | ✅ 已修 | 逐条抓取公告 JSON 取真实标题与轮播图 |
+| 插件自更新 | ✅ | 指向 `release` 分支 |
+| **增量更新** | ✅ 已验证 | 分片/索引粒度；`Char/…` 是虚拟路径**不是**磁盘文件 |
+| **修复（Repair）** | ✅ 已验证 | 与 Update 同一判定：缺失/截断/偏大的包重新下载 |
+| **社交侧栏** | ✅ 已实现 | 8 个官方渠道，带二维码图与跳转 |
+| 视频背景 | ⛔ 不适用 | 游戏与启动器都没有视频资源（仅 `Splash.bmp` 静态图） |
+| **全新安装（0 → 全量）** | 🚧 **待完成** | 基础包（144 个 / 64 GB）不在 patchlist，内容服务器全部 404；官方走 `bigpatch` 通道，**该通道未定位**。当前 `Install` 直接拒绝 |
+| 下载并发 / 重试 | ✅ | 4 路并行、`ArrayPool` 缓冲、每主机 2 次指数退避 |
 
-> **更新/修复/安装三种模式**（`NeteaseGamesPlanMode`）：`Update` 只下变更分片；`Install` 下全量；
-> `Repair` 只补磁盘上缺失或截断的部分（不追新版本，追新是 `Update` 的职责）。
+> **计划模式**（`NeteaseGamesPlanMode`）：`Update` 与 `Repair` 判定相同（远端大小 vs 磁盘大小）；
+> `Install` **不支持**，抛 `NotSupportedException`。
+> 远端清单取不到时抛异常——空计划意味着"未知"，不能当成"已完成"。
 
 ## 构建
 

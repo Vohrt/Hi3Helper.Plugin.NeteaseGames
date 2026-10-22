@@ -14,7 +14,7 @@ namespace Hi3Helper.NeteaseGames.Core;
 ///     <para>
 ///         The same envelope without the magic is also used for the CPS channel tag of the launcher. That
 ///         variant is not needed by the plugin (the game writes its own state) and is deliberately not
-///         implemented here - the reverse engineering record lives in <c>docs/re/netease-re.md</c>.
+///         implemented here - see <c>docs/re/netease-protocol.md</c>.
 ///     </para>
 /// </summary>
 public static class NeteaseGamesCrypto

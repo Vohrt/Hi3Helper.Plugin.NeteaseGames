@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using Hi3Helper.NeteaseGames.Core;
 using Hi3Helper.NeteaseGames.Core.Management;
@@ -8,111 +7,56 @@ using Xunit;
 namespace Hi3Helper.NeteaseGames.Tests;
 
 /// <summary>
-///     A fresh installation cannot be completed by downloading patch shards alone.
-///     <para>
-///         Verified against the live content host: it serves the patch shards (<c>Patch1000.mpk</c> under
-///         <c>mpk_script</c>) but answers 404 for every base package (<c>Patch.mpk</c>, <c>Patch1..123</c>,
-///         <c>ResourceExA..</c>) in every section. Those packages are 59 GB of a 64 GB installation and are not
-///         described by any manifest the plugin can read, so the installer has to refuse instead of reporting a
-///         completed installation that cannot start.
-///     </para>
+///     A fresh installation is not supported yet. The base packages (Patch.mpk, Patch1..127, ResourceExA..) are
+///     not part of the patch list and every content host path tried for them answers 404, so the installer has to
+///     refuse rather than report a completed installation that cannot start.
 /// </summary>
-public class BasePackageTests
+public class FreshInstallGuardTests
 {
-    private static string CreateInstallation(bool withBasePackages)
+    [Fact]
+    public void Plan_CarriesTheFreshInstallFlag()
     {
-        string root = Path.Combine(AppContext.BaseDirectory, "base-" + Guid.NewGuid().ToString("N"));
-        string patchDirectory = Path.Combine(root, NeteaseGamesPaths.PatchDirectoryRelativePath);
-        Directory.CreateDirectory(patchDirectory);
+        NeteaseGamesDownloadPlan plan = new() { IsFreshInstallUnsupported = true };
 
-        if (withBasePackages)
-        {
-            File.WriteAllBytes(Path.Combine(patchDirectory, NeteaseGamesGameInstaller.BasePackageName), [1, 2, 3]);
-            File.WriteAllBytes(Path.Combine(patchDirectory, "ResourceExA.mpk"), [4, 5, 6]);
-        }
-
-        return root;
-    }
-
-    private static void Cleanup(string root)
-    {
-        try
-        {
-            if (Directory.Exists(root))
-            {
-                Directory.Delete(root, recursive: true);
-            }
-        }
-        catch (IOException)
-        {
-            // Harmless leftover.
-        }
+        Assert.True(plan.IsFreshInstallUnsupported);
     }
 
     [Fact]
-    public void EmptyInstallation_ReportsTheMissingBasePackages()
+    public void Plan_DefaultsToSupported()
     {
-        string root = CreateInstallation(withBasePackages: false);
-        try
-        {
-            IReadOnlyList<string> missing = NeteaseGamesGameInstaller.FindMissingBasePackages(root);
-
-            Assert.Contains(NeteaseGamesGameInstaller.BasePackageName, missing);
-            Assert.Contains("ResourceExA.mpk", missing);
-        }
-        finally
-        {
-            Cleanup(root);
-        }
+        // Update and Repair never set the flag.
+        Assert.False(new NeteaseGamesDownloadPlan().IsFreshInstallUnsupported);
     }
 
     [Fact]
-    public void CompleteInstallation_ReportsNothingMissing()
+    public void Plan_DistinguishesAnUnavailableRemoteListFromAnEmptyPlan()
     {
-        string root = CreateInstallation(withBasePackages: true);
-        try
-        {
-            Assert.Empty(NeteaseGamesGameInstaller.FindMissingBasePackages(root));
-        }
-        finally
-        {
-            Cleanup(root);
-        }
+        // An empty plan means "nothing to do"; an unavailable list means "unknown". Conflating them made the
+        // installer report a healthy installation it never verified.
+        NeteaseGamesDownloadPlan empty = new();
+        Assert.True(empty.IsEmpty);
+        Assert.False(empty.IsRemoteListUnavailable);
+
+        NeteaseGamesDownloadPlan unknown = new() { IsRemoteListUnavailable = true };
+        Assert.True(unknown.IsEmpty);
+        Assert.True(unknown.IsRemoteListUnavailable);
     }
+}
 
-    [Fact]
-    public void BasePackageName_IsTheFirstPackageOfAnInstallation()
+/// <summary>
+///     Only the packages of the mpk sections are downloadable objects; the indexes are classified separately so
+///     they are written last.
+/// </summary>
+public class PackageClassificationTests
+{
+    [Theory]
+    [InlineData("script.mpkinfo", true)]
+    [InlineData("s_file.mpkinfo", true)]
+    [InlineData("indep.mpkinfo", true)]
+    [InlineData("Patch1000.mpk", false)]
+    [InlineData("Patch2000.mpk", false)]
+    public void IndexDetection(string name, bool expected)
     {
-        // `Patch.mpk` is the package every installation has; it never appears in a patch list.
-        Assert.Equal("Patch.mpk", NeteaseGamesGameInstaller.BasePackageName);
-    }
-
-    [Fact]
-    public void PatchShards_AreNotBasePackages()
-    {
-        // The numbered shards (Patch1000.mpk, Patch2000.mpk, ...) are downloadable and must not be confused with
-        // the base packages, which are not.
-        Assert.NotEqual("Patch1000.mpk", NeteaseGamesGameInstaller.BasePackageName);
-        Assert.True(NeteaseGamesGameInstaller.IsPackageIndex("script.mpkinfo"));
-        Assert.False(NeteaseGamesGameInstaller.IsPackageIndex(NeteaseGamesGameInstaller.BasePackageName));
-    }
-
-    [Fact]
-    public void Plan_CarriesTheMissingBasePackages()
-    {
-        // The plan exposes them so the installer can refuse before touching the disk.
-        NeteaseGamesDownloadPlan plan = new() { MissingBasePackages = ["Patch.mpk"] };
-
-        Assert.Single(plan.MissingBasePackages);
-        Assert.Equal("Patch.mpk", plan.MissingBasePackages[0]);
-    }
-
-    [Fact]
-    public void Plan_DefaultsToNoMissingPackages()
-    {
-        // Update and Repair never look at the base packages, so the default must stay empty.
-        NeteaseGamesDownloadPlan plan = new();
-
-        Assert.Empty(plan.MissingBasePackages);
+        Assert.Equal(expected, NeteaseGamesGameInstaller.IsPackageIndex(name));
     }
 }

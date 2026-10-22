@@ -190,24 +190,32 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
             ? await GetOrBuildPlanAsync(token).ConfigureAwait(false)
             : await BuildPlanAsync(gamePath, mode, token).ConfigureAwait(false);
 
+        // Without a remote list an empty plan means "unknown", not "complete". Failing here keeps the host from
+        // reporting a healthy installation it never verified.
+        if (plan.IsRemoteListUnavailable)
+        {
+            throw new IOException(
+                "The remote patch list could not be read, so the state of the installation is unknown. " +
+                "Check the network connection and try again.");
+        }
+
+        // A fresh installation cannot be completed by downloading patch shards alone: the base packages are not
+        // part of the patch list. Failing here is deliberate - reporting success would leave the player with an
+        // installation that cannot start.
+        if (plan.IsFreshInstallUnsupported)
+        {
+            throw new NotSupportedException(
+                "A fresh installation is not supported yet: the base packages (Patch.mpk, Patch1..127, " +
+                "ResourceExA..) are not part of the patch list and cannot be downloaded. Install the game with " +
+                "the official launcher once, then use this plugin to keep it updated.");
+        }
+
         if (plan.IsEmpty)
         {
             SharedStatic.InstanceLogger?.LogInformation(
                 "[NeteaseGames] Nothing to download ({Mode}), the installation is complete", mode);
             progressStateDelegate?.Invoke(InstallProgressState.Completed);
             return;
-        }
-
-        // A fresh installation cannot be completed by downloading patch shards alone: the base packages are not
-        // served by the content host. Failing here is deliberate - reporting success would leave the player with
-        // an installation that cannot start.
-        if (plan.MissingBasePackages.Count > 0)
-        {
-            throw new NotSupportedException(
-                "A fresh installation needs the base packages (" +
-                string.Join(", ", plan.MissingBasePackages) +
-                "), which the content host does not serve. Install the game with the official launcher once, " +
-                "then use this plugin to keep it updated.");
         }
 
         progressStateDelegate?.Invoke(InstallProgressState.Download);
@@ -343,23 +351,32 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         }
 
         // 2. The patch packages and the indexes that describe them.
+        //
+        // The remote list is the only authority here. It is fetched from the content version of the manifest
+        // (line 0), which is the same directory the launcher downloads from: the list served there is byte for
+        // byte the one the launcher keeps locally, and every package size in it matched the files the launcher
+        // installed. Using the local list as a reference was wrong - the launcher cannot decide from a file it
+        // wrote itself, otherwise it could never notice an update.
         NeteaseGamesPatchManifest? manifest = manager.RemotePatchManifest;
-        if (manifest is not null && !string.IsNullOrEmpty(manifest.BaseVersion))
+        if (manifest is not null && !string.IsNullOrEmpty(manifest.ContentVersion))
         {
-            // The local patch list is the only record of what the installation is supposed to contain, so a
-            // repair uses it (together with the files on disk) instead of throwing it away.
-            NeteaseGamesPatchList local = NeteaseGamesLocalState.ReadPatchList(gamePath) ?? new NeteaseGamesPatchList();
-            bool hasLocalList = local.Packages.Count > 0;
-
             NeteaseGamesPatchList remote = await manager
-                .FetchRemotePatchListAsync(manifest.BaseVersion, token)
+                .FetchRemotePatchListAsync(manifest.ContentVersion, token)
                 .ConfigureAwait(false);
+
+            if (remote.Packages.Count == 0)
+            {
+                // Without a package list there is nothing to plan; refuse instead of silently reporting success.
+                plan.IsRemoteListUnavailable = true;
+                SharedStatic.InstanceLogger?.LogError(
+                    "[NeteaseGames] The remote patch list of version {Version} contains no packages",
+                    manifest.ContentVersion);
+            }
 
             // The loose file section of the patch list is NOT a set of files on disk: those entries
             // (Char/…, Sounds/…, VA/… - 231k of them) are virtual engine paths that are stored inside the mpk
-            // packages. Verified on a live installation: none of them exists as a file, and 186 .mpk shards
-            // hold the content. Downloading them individually would fetch the whole game as loose files, so
-            // only the packages (and their indexes) are handled here.
+            // packages. Verified on a live installation: none of them exists as a file. Only the packages (and
+            // their indexes) are downloadable objects.
             if (remote.LooseFiles.Count > 0)
             {
                 SharedStatic.InstanceLogger?.LogDebug(
@@ -370,115 +387,48 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
             foreach ((string name, NeteaseGamesPackageEntry remotePackage) in remote.Packages)
             {
                 string packagePath = Path.Combine(gamePath, NeteaseGamesPaths.PatchDirectoryRelativePath, name);
-                bool existsOnDisk = File.Exists(packagePath);
-                long diskSize = existsOnDisk ? new FileInfo(packagePath).Length : -1;
 
-                bool localKnows = hasLocalList && local.Packages.ContainsKey(name);
-                NeteaseGamesPackageEntry? localPackage = localKnows ? local.Packages[name] : null;
-                bool localCurrent = localPackage is not null &&
-                                    NeteaseGamesPatchList.HashesEqual(localPackage.Hashes, remotePackage.Hashes);
-
-                // The local patch list is written by the official launcher and is kept in step with the packages it
-                // installed, while the remote list can lag behind: after a launcher run the on-disk packages
-                // matched the local list (Patch1000.mpk 15,767,230 bytes) but the remote list still announced the
-                // previous size (13,283,727), which produced an "update" of nine packages that were already
-                // current.
-                //
-                // A package is therefore considered done when the local list knows it AND the file on disk has the
-                // size that list records. Only packages the local list does not know, or whose file no longer
-                // matches it, are downloaded.
-                if (mode == NeteaseGamesPlanMode.Update && localPackage is not null && existsOnDisk &&
-                    diskSize == localPackage.TotalSize)
+                // Both modes compare against the size the remote list announces. An update brings the
+                // installation to the remote state and a repair restores exactly that state, so the two only
+                // differ in wording - what has to be downloaded is the same set.
+                if (IsLocalFileComplete(packagePath, remotePackage.TotalSize, verifyHash: false))
                 {
                     continue;
                 }
 
-                if (mode == NeteaseGamesPlanMode.Repair)
-                {
-                    // A repair restores the recorded state; it does not upgrade. A package the local list calls
-                    // current only has to be present with the recorded size; one it does not know is the update's
-                    // business.
-                    if (localKnows)
-                    {
-                        if (existsOnDisk && localPackage is not null && diskSize == localPackage.TotalSize)
-                        {
-                            continue;
-                        }
-                    }
-                    else if (IsLocalFileComplete(packagePath, remotePackage.TotalSize, verifyHash: false))
-                    {
-                        continue;
-                    }
-                }
-
                 plan.Items.Add(new NeteaseGamesDownloadItem
                 {
-                    RelativePath = ContentPath(manifest.BaseVersion, remotePackage.Section, name),
+                    RelativePath = ContentPath(manifest.ContentVersion, remotePackage.Section, name),
                     TargetRelativePath = name,
                     Kind = IsPackageIndex(name) ? NeteaseGamesDownloadKind.Index : NeteaseGamesDownloadKind.Package,
                     ExpectedSize = remotePackage.TotalSize
                 });
             }
         }
+        else
+        {
+            plan.IsRemoteListUnavailable = true;
+            SharedStatic.InstanceLogger?.LogError(
+                "[NeteaseGames] The remote manifest is missing or carries no content version; nothing can be planned");
+        }
 
         plan.AssignStaging(stagingDirectory);
 
-        // A fresh installation needs the base packages (Patch.mpk, Patch1..123, ResourceExA..) as well, and
-        // those are NOT served by the content host: every section answers 404 for them, the patch list does not
-        // describe them, and the engine payload is only ~1.3 GB while they are ~59 GB. They come from the
-        // vendor's own full installation. Refusing here is what keeps the host from reporting a completed
-        // installation that cannot start.
+        // A fresh installation is not supported yet (see Install below and the TODO in the README): the base
+        // packages (Patch.mpk, Patch1..127, ResourceExA..) are not part of the patch list and every content host
+        // path tried for them answers 404, so they can only be produced by the vendor's own installation. Refuse
+        // instead of reporting a completed installation that cannot start.
         if (mode == NeteaseGamesPlanMode.Install)
         {
-            IReadOnlyList<string> missingBase = FindMissingBasePackages(gamePath);
-            if (missingBase.Count > 0)
-            {
-                plan.MissingBasePackages = missingBase;
-                SharedStatic.InstanceLogger?.LogWarning(
-                    "[NeteaseGames] A fresh installation needs {Count} base packages that the content host does not serve ({Sample}). The installation has to be created by the official launcher first.",
-                    missingBase.Count, string.Join(", ", missingBase.Take(5)));
-            }
+            plan.IsFreshInstallUnsupported = true;
         }
 
         SharedStatic.InstanceLogger?.LogInformation(
-            "[NeteaseGames] Plan ({Mode}): {Packages} packages, {Indexes} indexes, {Loose} loose files, {Size} bytes",
-            mode, plan.PackageCount, plan.IndexCount, plan.LooseCount, plan.TotalSize);
+            "[NeteaseGames] Plan ({Mode}): {Packages} packages, {Indexes} indexes, {Size} bytes",
+            mode, plan.PackageCount, plan.IndexCount, plan.TotalSize);
 
         return plan;
     }
-
-    /// <summary>
-    ///     Returns the base packages (<c>Patch.mpk</c>, <c>Patch&lt;n&gt;.mpk</c>, <c>ResourceExA..</c>) that are
-    ///     missing from an installation.
-    ///     <para>
-    ///     These are the packages the game cannot start without, and unlike the patch shards they are not part
-    ///     of any manifest the plugin can read - the content host answers 404 for them. They are only created by
-    ///     the vendor's own full installation.
-    ///     </para>
-    /// </summary>
-    /// <param name="gamePath">The installation root.</param>
-    public static IReadOnlyList<string> FindMissingBasePackages(string gamePath)
-    {
-        List<string> missing = [];
-        string patchDirectory = Path.Combine(gamePath, NeteaseGamesPaths.PatchDirectoryRelativePath);
-
-        // The very first package every installation has; without it the game cannot read its content.
-        if (!File.Exists(Path.Combine(patchDirectory, BasePackageName)))
-        {
-            missing.Add(BasePackageName);
-        }
-
-        // The resource packages the engine looks up by name (ResourceExA..ResourceExF and their numbered parts).
-        if (!File.Exists(Path.Combine(patchDirectory, "ResourceExA.mpk")))
-        {
-            missing.Add("ResourceExA.mpk");
-        }
-
-        return missing;
-    }
-
-    /// <summary>The first content package of every installation; it is not part of any patch list.</summary>
-    public const string BasePackageName = "Patch.mpk";
 
     /// <summary>
     ///     Whether a local file is already the expected one. Only the size can be checked (the vendor hash

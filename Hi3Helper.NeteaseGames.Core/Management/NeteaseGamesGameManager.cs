@@ -377,26 +377,17 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             _remotePatchManifestText = text;
         }
 
-        if (manifest.LatestPackageVersion > 0)
+        if (manifest.PatchVersion > 0)
         {
-            return manifest.LatestPackageVersion;
+            return manifest.PatchVersion;
         }
 
-        string[] lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        // Parsing already reads line 3; this is only reached for a malformed manifest.
+        SharedStatic.InstanceLogger?.LogWarning(
+            "[NeteaseGames] The remote manifest carries no usable patch version: '{Text}'",
+            text.Length > 200 ? text[..200] : text);
 
-        // Line layout: <engine version>, <big patch md5>, <package version>, <private script version>.
-        // Depending on the branch the package version is on the third or on the fourth line, so the
-        // largest of the two numeric candidates is used.
-        long best = 0;
-        for (int i = 2; i < lines.Length && i < 4; i++)
-        {
-            if (long.TryParse(lines[i], out long candidate) && candidate > best)
-            {
-                best = candidate;
-            }
-        }
-
-        return best;
+        return 0;
     }
 
     /// <summary>

@@ -113,15 +113,19 @@ public sealed class NeteaseGamesDownloadPlan
     public string? LauncherRecord { get; init; }
 
     /// <summary>
-    ///     Base packages a fresh installation would need but cannot download.
+    ///     Set when the remote list could not be obtained or carried no packages.
     ///     <para>
-    ///         The content host serves only the patch shards; the base packages (<c>Patch.mpk</c>,
-    ///         <c>ResourceExA..</c>) are not part of any manifest the plugin can read and are not downloadable.
-    ///         When this is not empty the installation has to be created by the official launcher first, and the
-    ///         installer must refuse rather than report a completed installation that cannot start.
+    ///         An empty plan normally means "nothing to do", but without a remote list it means "unknown". The
+    ///         installer must fail in that case instead of reporting the installation as complete.
     ///     </para>
     /// </summary>
-    public IReadOnlyList<string> MissingBasePackages { get; set; } = [];
+    public bool IsRemoteListUnavailable { get; set; }
+
+    /// <summary>
+    ///     Set for an <c>Install</c> plan. A fresh installation needs the base packages, which are not part of the
+    ///     patch list and cannot be downloaded yet, so the installer refuses with an explanation.
+    /// </summary>
+    public bool IsFreshInstallUnsupported { get; set; }
 
     /// <summary>The staging directory every object is downloaded into.</summary>
     public string StagingDirectory { get; init; } = string.Empty;

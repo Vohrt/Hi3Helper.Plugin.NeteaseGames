@@ -349,25 +349,46 @@ public sealed class NeteaseGamesPatchList
 }
 
 /// <summary>
-///     The JSON part of the remote patch manifest (<c>patchmd5_windows64_normal.txt</c>).
+///     The remote patch manifest (<c>OB_patchmd5_windows64_normal.txt</c>).
 ///     <para>
-///         The document starts with four numeric lines and is followed by a JSON object. The second line is the
-///         hash of the remote file list, the <c>normal.latest_pkgversion</c> property of the JSON part carries
-///         the authoritative package version.
+///         The document is four header lines followed by a JSON object:
+///     </para>
+///     <code>
+///         20261022122731826          line 0 - content version, the directory of the content host
+///         16867045629764259494       line 1 - hash of the patch list
+///         0                          line 2 - reserved
+///         6582435                    line 3 - installed patch version
+///         { "normal": {...}, "@metadata@": {...} }
+///     </code>
+///     <para>
+///         <b>Line 0 is the version the content host serves objects from.</b> It is NOT
+///         <c>@metadata@.@base_version@</c>: measured on 2026-10-22, requesting
+///         <c>/20261021113421287/mpk_script/Patch1000.mpk</c> (the metadata value) returned a 13,283,727 byte
+///         object while the launcher installed 15,767,230 bytes; requesting the same file under line 0
+///         (<c>/20261022122731826/...</c>) returned exactly 15,767,230 bytes, and the patch list served from
+///         there was byte-for-byte the 9,298,776 byte list the launcher wrote locally.
 ///     </para>
 /// </summary>
 public sealed record NeteaseGamesPatchManifest
 {
-    /// <summary>The base version of the patch (the version directory of the content host).</summary>
+    /// <summary>
+    ///     The content version objects are downloaded from - <b>line 0</b> of the manifest.
+    /// </summary>
+    public string ContentVersion { get; init; } = string.Empty;
+
+    /// <summary>
+    ///     <c>@metadata@.@base_version@</c>. Informational only: it is not the directory the content host serves
+    ///     objects from (see the type documentation).
+    /// </summary>
     public string BaseVersion { get; init; } = string.Empty;
 
-    /// <summary>The newest package version.</summary>
-    public long LatestPackageVersion { get; init; }
+    /// <summary>The patch version (<b>line 3</b>), which is what decides whether an installation is current.</summary>
+    public long PatchVersion { get; init; }
 
     /// <summary>The engine version the patch belongs to.</summary>
     public string EngineVersion { get; init; } = string.Empty;
 
-    /// <summary>The version of the patch list (the hash of the remote file list).</summary>
+    /// <summary>The version of the patch list (the hash of the remote file list, line 1).</summary>
     public ulong PatchListHash { get; init; }
 
     /// <summary>
@@ -379,51 +400,56 @@ public sealed record NeteaseGamesPatchManifest
         ArgumentNullException.ThrowIfNull(text);
 
         NeteaseGamesPatchManifest result = new();
-        string[] lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (lines.Length >= 2 && ulong.TryParse(lines[1], out ulong patchListHash))
+
+        // The four header lines come before the JSON body.
+        int bodyStart = text.IndexOf('{');
+        string header = bodyStart >= 0 ? text[..bodyStart] : text;
+        string[] lines = header.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        // Line 0 is the content version: the directory every object is requested from. It is always a long
+        // numeric stamp (17 digits on the live branch), so anything else means this is not a manifest and must
+        // not be used to build URLs.
+        if (lines.Length >= 1)
+        {
+            string candidate = lines[0].Trim().Trim('"');
+            if (IsContentVersion(candidate))
+            {
+                result = result with { ContentVersion = candidate };
+            }
+        }
+
+        if (lines.Length >= 2 && ulong.TryParse(lines[1].Trim().Trim('"'), out ulong patchListHash))
         {
             result = result with { PatchListHash = patchListHash };
         }
 
-        int start = text.IndexOf('{');
-        if (start < 0)
+        // Line 3 is the installed patch version.
+        if (lines.Length >= 4 && long.TryParse(lines[3].Trim().Trim('"'), out long patchVersion))
+        {
+            result = result with { PatchVersion = patchVersion };
+        }
+
+        if (bodyStart < 0)
         {
             return result;
         }
 
         try
         {
-            using JsonDocument document = JsonDocument.Parse(text[start..]);
+            using JsonDocument document = JsonDocument.Parse(text[bodyStart..]);
             JsonElement root = document.RootElement;
 
-            long latest = 0;
             string baseVersion = string.Empty;
             string engineVersion = string.Empty;
             if (root.TryGetProperty("@metadata@", out JsonElement metadata))
             {
-                // The authoritative package version of the branch. `normal.latest_pkgversion` must NOT be
-                // used: it carried a stale value from another branch (5282637) while the real version was
-                // 6534552, which made the plugin report a permanent update.
-                if (metadata.TryGetProperty("@private_res_version@", out JsonElement privateVersion))
-                {
-                    if (privateVersion.ValueKind == JsonValueKind.Number && privateVersion.TryGetInt64(out long parsedNumber))
-                    {
-                        latest = parsedNumber;
-                    }
-                    else if (privateVersion.ValueKind == JsonValueKind.String &&
-                             long.TryParse(privateVersion.GetString(), out long parsedText))
-                    {
-                        latest = parsedText;
-                    }
-                }
-
                 if (metadata.TryGetProperty("@base_version@", out JsonElement baseElement))
                 {
                     baseVersion = baseElement.ValueKind switch
                     {
                         JsonValueKind.Number => baseElement.GetRawText(),
                         JsonValueKind.String => baseElement.GetString() ?? string.Empty,
-                        _ => string.Empty
+                        _                  => string.Empty
                     };
                 }
 
@@ -432,24 +458,25 @@ public sealed record NeteaseGamesPatchManifest
                 {
                     engineVersion = engineElement.GetString() ?? string.Empty;
                 }
-            }
 
-            if (latest <= 0)
-            {
-                // Fall back to the fourth numeric line, which repeats the same version.
-                string[] versionLines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                for (int i = 2; i < versionLines.Length && i < 4; i++)
+                // Line 3 is authoritative; the metadata copy is only used when the line is missing.
+                if (result.PatchVersion <= 0 &&
+                    metadata.TryGetProperty("@private_res_version@", out JsonElement privateVersion))
                 {
-                    if (long.TryParse(versionLines[i], out long candidate) && candidate > latest)
+                    if (privateVersion.ValueKind == JsonValueKind.Number && privateVersion.TryGetInt64(out long parsedNumber))
                     {
-                        latest = candidate;
+                        result = result with { PatchVersion = parsedNumber };
+                    }
+                    else if (privateVersion.ValueKind == JsonValueKind.String &&
+                             long.TryParse(privateVersion.GetString(), out long parsedText))
+                    {
+                        result = result with { PatchVersion = parsedText };
                     }
                 }
             }
 
             result = result with
             {
-                LatestPackageVersion = latest,
                 BaseVersion = baseVersion,
                 EngineVersion = engineVersion
             };
@@ -460,6 +487,34 @@ public sealed record NeteaseGamesPatchManifest
         }
 
         return result;
+    }
+
+    /// <summary>
+    ///     Whether the manifest carries everything needed to plan a download.
+    /// </summary>
+    public bool IsUsable => !string.IsNullOrEmpty(ContentVersion) && PatchVersion > 0;
+
+    /// <summary>
+    ///     Whether a token is a plausible content version. The value is a long numeric stamp (17 digits on the
+    ///     live branch); rejecting anything else keeps a malformed response from being turned into URLs.
+    /// </summary>
+    /// <param name="value">The candidate token.</param>
+    public static bool IsContentVersion(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length < 8 || value.Length > 32)
+        {
+            return false;
+        }
+
+        foreach (char character in value)
+        {
+            if (character is < '0' or > '9')
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }
 

@@ -7,142 +7,151 @@ using Xunit;
 
 namespace Hi3Helper.NeteaseGames.Tests;
 
+/// <summary>
+///     The remote manifest is four header lines followed by JSON. <b>Line 0 is the content version</b> - the
+///     directory every object is downloaded from - and <b>line 3 is the patch version</b> that decides whether an
+///     installation is current. <c>@metadata@.@base_version@</c> is neither: requesting objects under it returns
+///     older packages (measured 2026-10-22: 13,283,727 bytes instead of the installed 15,767,230).
+/// </summary>
 public class ManifestParsingTests
 {
+    /// <summary>The live manifest of 2026-10-22, trimmed to the relevant fields.</summary>
+    private const string LiveManifest = """
+        20261022122731826
+        16867045629764259494
+        0
+        6582435
+        {"normal":{"mininum_pkgversion":0,"review_pkgversion":[],"new_package_url":"","latest_pkgversion":5282637},"@metadata@":{"@base_version@":"20261021113421287","@private_res_version@":6582435,"@private_patch_version@":6582435,"@private_script_version@":6582435,"@engine_version@":"261019222124_71902dc10_release","@patch_branch@":"release"}}
+        """;
+
+    [Fact]
+    public void ContentVersion_ComesFromLineZero()
+    {
+        NeteaseGamesPatchManifest manifest = NeteaseGamesPatchManifest.Parse(LiveManifest);
+
+        Assert.Equal("20261022122731826", manifest.ContentVersion);
+        // The metadata value is a different number and must not be used as the download directory.
+        Assert.Equal("20261021113421287", manifest.BaseVersion);
+        Assert.NotEqual(manifest.ContentVersion, manifest.BaseVersion);
+    }
+
+    [Fact]
+    public void PatchVersion_ComesFromLineThree()
+    {
+        NeteaseGamesPatchManifest manifest = NeteaseGamesPatchManifest.Parse(LiveManifest);
+
+        Assert.Equal(6582435, manifest.PatchVersion);
+        // `normal.latest_pkgversion` carries a stale value of another branch and is never read.
+        Assert.NotEqual(5282637, manifest.PatchVersion);
+    }
+
+    [Fact]
+    public void PatchListHash_ComesFromLineOne()
+    {
+        Assert.Equal(16867045629764259494UL, NeteaseGamesPatchManifest.Parse(LiveManifest).PatchListHash);
+    }
+
+    [Fact]
+    public void EngineVersion_IsReadFromMetadata()
+    {
+        Assert.Equal("261019222124_71902dc10_release",
+            NeteaseGamesPatchManifest.Parse(LiveManifest).EngineVersion);
+    }
+
+    [Fact]
+    public void IsUsable_RequiresAContentVersionAndAPatchVersion()
+    {
+        Assert.True(NeteaseGamesPatchManifest.Parse(LiveManifest).IsUsable);
+
+        // No header at all: nothing can be planned.
+        Assert.False(NeteaseGamesPatchManifest.Parse("""{"@metadata@":{}}""").IsUsable);
+
+        // Header without a usable version on line 3 and without the metadata copy.
+        Assert.False(NeteaseGamesPatchManifest.Parse("a\nb\nc\nd\n{}").IsUsable);
+    }
+
+    [Fact]
+    public void PatchVersion_FallsBackToMetadataWhenLineThreeIsMissing()
+    {
+        // A manifest without the header still announces the version inside the metadata block.
+        const string withoutHeader = """
+            {"@metadata@":{"@private_res_version@":6534552,"@base_version@":"20261014065508363"}}
+            """;
+
+        Assert.Equal(6534552, NeteaseGamesPatchManifest.Parse(withoutHeader).PatchVersion);
+    }
+
+    [Fact]
+    public void MalformedManifest_DoesNotThrow()
+    {
+        NeteaseGamesPatchManifest manifest = NeteaseGamesPatchManifest.Parse("not a manifest at all");
+
+        Assert.False(manifest.IsUsable);
+        Assert.Equal(0, manifest.PatchVersion);
+        Assert.Equal(string.Empty, manifest.ContentVersion);
+    }
+
     [Fact]
     public void EngineFileList_IsParsed_WithPathHashAndSize()
     {
+        // The live format: each download block is a two element array [md5, size].
         const string text =
-            "Binaries\\Win64Release\\amd_fidelityfx_dx12.dll.1 15902446965336017002 6647504\r\n" +
-            "Binaries\\Win64Release\\cclibdll.dll.1 4977914232404058321 183016\n" +
-            "\n";
+            """
+            {"download_info":[["abc",100],["def",200]],
+             "loose_file_parent_dir":"loose_file/x","engine_version":"v1",
+             "data_name":"d","current_version":"1","parent_dir":"p"}
+            """;
 
-        IReadOnlyList<NeteaseGamesEngineFile> files = NeteaseGamesEnginePatcher.ParseEngineFileList(text);
+        NeteaseGamesMiniPackManifest manifest = NeteaseGamesMiniPackManifest.Parse(
+            System.Text.Encoding.UTF8.GetBytes(text));
 
-        Assert.Equal(2, files.Count);
-        Assert.Equal("Binaries\\Win64Release\\amd_fidelityfx_dx12.dll.1", files[0].RelativePath);
-        Assert.Equal(15902446965336017002UL, files[0].Hash);
-        Assert.Equal(6647504, files[0].Size);
-
-        // The payload stores the newest generation with a ".1" suffix; the game uses the plain name.
-        Assert.Equal("Binaries\\Win64Release\\amd_fidelityfx_dx12.dll", files[0].TargetName);
-        Assert.Equal("Binaries/Win64Release/amd_fidelityfx_dx12.dll.1", files[0].UrlPath);
+        Assert.Equal("loose_file/x", manifest.LooseFileParentDir);
+        Assert.Equal(2, manifest.DownloadInfo.Count);
+        Assert.Equal("abc", manifest.DownloadInfo[0].Md5);
+        Assert.Equal(100, manifest.DownloadInfo[0].Size);
     }
+}
 
+/// <summary>
+///     Package entries in the patch list end with the package size; every preceding number is a chunk hash.
+/// </summary>
+public class PatchListPackageEntryTests
+{
     [Fact]
-    public void EngineFileList_IgnoresMalformedLines()
+    public void LastNumberIsThePackageSize()
     {
-        const string text = "no-spaces\npath 123\npath notanumber 5\npath 1 2\n";
-
-        IReadOnlyList<NeteaseGamesEngineFile> files = NeteaseGamesEnginePatcher.ParseEngineFileList(text);
-
-        Assert.Single(files);
-        Assert.Equal("path", files[0].RelativePath);
-    }
-
-    [Fact]
-    public void EngineFileList_DetectsDeleteMarkers()
-    {
-        NeteaseGamesEngineFile marker = new("used_del_dir/somefile", 0, 0);
-        Assert.True(NeteaseGamesEnginePatcher.IsDeleteMarker(marker));
-    }
-
-    [Fact]
-    public void PatchManifest_ReadsPackageVersionAndBaseVersion()
-    {
-        // A trimmed copy of the live document: the authoritative version is @private_res_version@, while
-        // normal.latest_pkgversion carries a different (stale, other branch) value.
-        const string text =
-            "20261016125738025\n" +
-            "7586518639554130336\n" +
-            "0\n" +
-            "6534552\n" +
-            "{\"normal\":{\"latest_pkgversion\":5282637},\"@metadata@\":{\"@base_version@\":20261014065508363," +
-            "\"@private_res_version@\":\"6534552\",\"@engine_version@\":\"261014173721_4a476f25b_release\"}}";
-
-        NeteaseGamesPatchManifest manifest = NeteaseGamesPatchManifest.Parse(text);
-
-        Assert.Equal(6534552, manifest.LatestPackageVersion);
-        Assert.NotEqual(5282637, manifest.LatestPackageVersion);
-        Assert.Equal("20261014065508363", manifest.BaseVersion);
-        Assert.Equal("261014173721_4a476f25b_release", manifest.EngineVersion);
-        Assert.Equal(7586518639554130336UL, manifest.PatchListHash);
-    }
-
-    [Fact]
-    public void PatchManifest_FallsBackToTheVersionLine()
-    {
-        // No @private_res_version@ in the payload: the fourth line still carries the same number.
-        const string text =
-            "20261016125738025\n7586518639554130336\n0\n6534552\n{\"normal\":{\"latest_pkgversion\":5282637}}";
-
-        NeteaseGamesPatchManifest manifest = NeteaseGamesPatchManifest.Parse(text);
-
-        Assert.Equal(6534552, manifest.LatestPackageVersion);
-    }
-
-    [Fact]
-    public void PatchManifest_ToleratesMissingJson()
-    {
-        NeteaseGamesPatchManifest manifest = NeteaseGamesPatchManifest.Parse("20261016125738025\n42\n");
-
-        Assert.Equal(42UL, manifest.PatchListHash);
-        Assert.Equal(0, manifest.LatestPackageVersion);
-        Assert.Equal(string.Empty, manifest.BaseVersion);
-    }
-
-    [Fact]
-    public void PatchManifest_ToleratesBrokenJson()
-    {
-        NeteaseGamesPatchManifest manifest = NeteaseGamesPatchManifest.Parse("a\n1\n0\n0\n{not json");
-
-        Assert.Equal(1UL, manifest.PatchListHash);
-        Assert.Equal(0, manifest.LatestPackageVersion);
-    }
-
-    [Fact]
-    public void PatchList_SplitsLooseFilesPackagesAndSizes()
-    {
+        // Shape taken from the live list: Patch2000.mpk with chunk hashes and a trailing size.
         const string json = """
-            {
-              "mapping_version": "20261014065508363",
-              "common": { "a/b.txt": [111, 22] },
-              "windows64_common": { "c/d.txt": [333, 44] },
-              "mpk_script": { "script.mpkinfo": [1, 2, 3, 999] },
-              "mpk_medium": { "Patch2000.mpk": [7, 888] },
-              "file_sections": ["common", "windows64_common"],
-              "mpkexclude": ["prerequisite", "Misc/lazycode_zstd_dict"]
-            }
+            {"mpk_medium":{"Patch2000.mpk":[3996881272972637595,7003971163209048021,15629001]},
+             "file_sections":["mpk_medium"]}
             """;
 
         NeteaseGamesPatchList list = NeteaseGamesPatchList.Parse(System.Text.Encoding.UTF8.GetBytes(json));
 
-        Assert.Equal("20261014065508363", list.MappingVersion);
-        Assert.Equal(2, list.LooseFiles.Count);
-        Assert.Equal(111UL, list.LooseFiles["a/b.txt"].Hash);
-        Assert.Equal(22, list.LooseFiles["a/b.txt"].Size);
-        Assert.Equal(2, list.Packages.Count);
-
-        // The last number of a package array is its size, the others are the hashes of the contained files.
-        NeteaseGamesPackageEntry script = list.Packages["script.mpkinfo"];
-        Assert.Equal(999, script.TotalSize);
-        Assert.Equal([1UL, 2UL, 3UL], script.Hashes);
-        Assert.Equal("mpk_script", script.Section);
-
-        Assert.Equal("mpk_medium", list.Packages["Patch2000.mpk"].Section);
-        Assert.Equal(2, list.MpkExclude.Count);
-        Assert.Equal(2, list.FileSections.Count);
+        NeteaseGamesPackageEntry entry = list.Packages["Patch2000.mpk"];
+        Assert.Equal(15629001, entry.TotalSize);
+        // The size is not kept among the hashes.
+        Assert.Equal(2, entry.Hashes.Count);
+        Assert.DoesNotContain(15629001UL, entry.Hashes);
+        Assert.Equal("mpk_medium", entry.Section);
     }
 
     [Fact]
-    public void PatchList_HashComparisonIsOrderSensitive()
+    public void LooseSectionsAreNotPackages()
     {
-        List<ulong> left = [1, 2, 3];
-        List<ulong> right = [1, 2, 3];
-        List<ulong> different = [1, 2, 4];
+        // `common` / `windows64_common` describe virtual engine paths stored inside the packages; they are not
+        // downloadable objects and must never be planned.
+        const string json = """
+            {"common":{"Char/Prop/base_sp.skeleton":[111,222]},
+             "windows64_common":{"00/abc":[333,444]},
+             "mpk_script":{"Patch1000.mpk":[555,666]},
+             "file_sections":["common","windows64_common","mpk_script"]}
+            """;
 
-        Assert.True(NeteaseGamesPatchList.HashesEqual(left, right));
-        Assert.False(NeteaseGamesPatchList.HashesEqual(left, different));
-        Assert.False(NeteaseGamesPatchList.HashesEqual(left, [1, 2]));
+        NeteaseGamesPatchList list = NeteaseGamesPatchList.Parse(System.Text.Encoding.UTF8.GetBytes(json));
+
+        Assert.Single(list.Packages);
+        Assert.True(list.Packages.ContainsKey("Patch1000.mpk"));
+        Assert.Equal(2, list.LooseFiles.Count);
     }
 }
