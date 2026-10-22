@@ -173,15 +173,20 @@ public sealed class NeteaseGamesLocalState
         string documentsDirectory = Path.Combine(gameDirectory, NeteaseGamesPaths.DocumentsRelativePath);
 
         long packageVersion = ReadInt(Path.Combine(patchDirectory, NeteaseGamesPaths.PackageVersionFileName));
+
+        // `pkgversion` is the file the plugin writes as the commit point of an update, so it is the authority on
+        // what is installed. The other two sources are written by the game client and go stale after a plugin
+        // update; they are only used when `pkgversion` is missing.
         long patchVersion = packageVersion;
         string engineVersion = ReadText(Path.Combine(gameDirectory, NeteaseGamesPaths.BuiltVersionRelativePath));
         string latestEngineVersion = ReadText(Path.Combine(patchDirectory, NeteaseGamesPaths.LatestEngineVersionFileName));
         string gameVersionToken = ReadText(Path.Combine(patchDirectory, NeteaseGamesPaths.GameVersionFileName));
         string shaderVersion = string.Empty;
 
-        // The local patchmd5 file announces the newest known patch version.
+        // The local patchmd5 file announces the newest patch version the client knows about. It is not refreshed
+        // by a plugin update, so it may only fill in when `pkgversion` is unreadable.
         string patchMd5File = Path.Combine(patchDirectory, NeteaseGamesPaths.PatchMd5FileName);
-        if (File.Exists(patchMd5File))
+        if (patchVersion <= 0 && File.Exists(patchMd5File))
         {
             try
             {
@@ -208,7 +213,10 @@ public sealed class NeteaseGamesLocalState
             }
         }
 
-        // versiondata.json carries the same numbers in a machine readable form.
+        // versiondata.json is written by the game client, not by the plugin, so it goes stale as soon as the
+        // plugin installs an update: it kept reporting the version from before the update and the host then
+        // offered the same update forever. It is therefore only a fallback for the values the plugin cannot
+        // read from the patch directory itself.
         string versionDataFile = Path.Combine(documentsDirectory, "versiondata.json");
         if (File.Exists(versionDataFile))
         {
@@ -216,13 +224,15 @@ public sealed class NeteaseGamesLocalState
             {
                 using JsonDocument document = JsonDocument.Parse(File.ReadAllBytes(versionDataFile));
                 JsonElement root = document.RootElement;
-                if (root.TryGetProperty("package_version", out JsonElement packageValue) &&
+                if (packageVersion <= 0 &&
+                    root.TryGetProperty("package_version", out JsonElement packageValue) &&
                     TryGetInt64Flexible(packageValue, out long parsedPackage))
                 {
                     packageVersion = parsedPackage;
                 }
 
-                if (root.TryGetProperty("patch_version", out JsonElement patchValue) &&
+                if (patchVersion <= 0 &&
+                    root.TryGetProperty("patch_version", out JsonElement patchValue) &&
                     TryGetInt64Flexible(patchValue, out long parsedPatch))
                 {
                     patchVersion = parsedPatch;

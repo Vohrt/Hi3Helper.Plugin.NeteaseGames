@@ -43,8 +43,12 @@ Collapse Launcher 的网易游戏插件。**一个发行商 Core + 每游戏一�
 
 ## 版本判定（踩过的坑）
 
-- 权威包版本 = `@metadata@.@private_res_version@`（= 文本第 4 行），**不是** `normal.latest_pkgversion`
-  （后者是别的分支的陈旧值，5282637 vs 真实 6534552 ⇒ 会误报永久有更新）。
+- **远端**权威版本 = `@metadata@.@private_res_version@`（= 文本第 4 行），**不是**
+  `normal.latest_pkgversion`（后者是别的分支的陈旧值，5282637 vs 真实 6534552 ⇒ 会误报永久有更新）。
+- **本地**权威版本 = `LocalData\Patch\pkgversion`，因为它是**插件更新时写入的提交点**。
+  `Documents\versiondata.json`（`patch_version`）和 `patchmd5`（`latest_pkgversion`）都是**游戏客户端写的**，
+  插件更新不会刷新它们 ⇒ 只作回退。曾经让 `versiondata.json` 优先，导致更新装完后仍提示需要更新、
+  无法开始游戏（`pkgversion` 已 6582435，而 `versiondata.json` 还是 6534552）。
 
 ## 安全约定
 
