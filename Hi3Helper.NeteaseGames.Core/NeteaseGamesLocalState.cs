@@ -318,7 +318,16 @@ public sealed class NeteaseGamesLocalState
         NeteaseGamesPatchList? list = null;
         try
         {
-            byte[] plain = NeteaseGamesCrypto.DecryptHexEnvelope(File.ReadAllBytes(file));
+            byte[] raw = File.ReadAllBytes(file);
+
+            // The list is stored in the HEX_ envelope by the game, but the content host serves it as plain text
+            // and the official launcher keeps whatever it downloaded. Both shapes have to be accepted, otherwise
+            // a list that came from the content host looks like a missing one and every package counts as
+            // changed.
+            byte[] plain = NeteaseGamesCrypto.IsHexEnvelope(raw)
+                ? NeteaseGamesCrypto.DecryptHexEnvelope(raw)
+                : raw;
+
             list = NeteaseGamesPatchList.Parse(plain);
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or FormatException or JsonException)

@@ -196,3 +196,98 @@ public class LauncherRecordTests
         }
     }
 }
+
+/// <summary>
+///     The patch list is served by the content host as plain text while the game stores it inside the HEX_
+///     envelope. Both shapes must be readable: a plain list that fails to parse looks like a missing one, and
+///     then every package counts as changed (a 732 MB "update" for an installation that is already current).
+/// </summary>
+public class PatchListFormatTests
+{
+    private const string SampleList = """
+        {"common":{"Char/Prop/base_sp.skeleton":[111,222]},"mpk_medium":{"Patch2000.mpk":[7,888]},"file_sections":["common","mpk_medium"]}
+        """;
+
+    [Fact]
+    public void ReadPatchList_AcceptsAPlainTextList()
+    {
+        string root = Path.Combine(AppContext.BaseDirectory, "pl-" + Guid.NewGuid().ToString("N"));
+        string patchDirectory = Path.Combine(root, NeteaseGamesPaths.PatchDirectoryRelativePath);
+        Directory.CreateDirectory(patchDirectory);
+
+        try
+        {
+            File.WriteAllText(Path.Combine(patchDirectory, NeteaseGamesPaths.PatchListFileName), SampleList);
+
+            NeteaseGamesPatchList? list = NeteaseGamesLocalState.ReadPatchList(root);
+
+            Assert.NotNull(list);
+            Assert.Single(list!.Packages);
+            Assert.Equal(888, list.Packages["Patch2000.mpk"].TotalSize);
+        }
+        finally
+        {
+            NeteaseGamesLocalState.InvalidatePatchListCache(root);
+            Cleanup(root);
+        }
+    }
+
+    [Fact]
+    public void ReadPatchList_AcceptsAnEnvelopedList()
+    {
+        string root = Path.Combine(AppContext.BaseDirectory, "pl-" + Guid.NewGuid().ToString("N"));
+        string patchDirectory = Path.Combine(root, NeteaseGamesPaths.PatchDirectoryRelativePath);
+        Directory.CreateDirectory(patchDirectory);
+
+        try
+        {
+            byte[] encrypted = NeteaseGamesCrypto.EncryptHexEnvelope(Encoding.UTF8.GetBytes(SampleList));
+            File.WriteAllBytes(Path.Combine(patchDirectory, NeteaseGamesPaths.PatchListFileName), encrypted);
+
+            NeteaseGamesPatchList? list = NeteaseGamesLocalState.ReadPatchList(root);
+
+            Assert.NotNull(list);
+            Assert.Single(list!.Packages);
+        }
+        finally
+        {
+            NeteaseGamesLocalState.InvalidatePatchListCache(root);
+            Cleanup(root);
+        }
+    }
+
+    [Fact]
+    public void ReadPatchList_ReturnsNullForGarbage()
+    {
+        string root = Path.Combine(AppContext.BaseDirectory, "pl-" + Guid.NewGuid().ToString("N"));
+        string patchDirectory = Path.Combine(root, NeteaseGamesPaths.PatchDirectoryRelativePath);
+        Directory.CreateDirectory(patchDirectory);
+
+        try
+        {
+            File.WriteAllText(Path.Combine(patchDirectory, NeteaseGamesPaths.PatchListFileName), "not json");
+
+            Assert.Null(NeteaseGamesLocalState.ReadPatchList(root));
+        }
+        finally
+        {
+            NeteaseGamesLocalState.InvalidatePatchListCache(root);
+            Cleanup(root);
+        }
+    }
+
+    private static void Cleanup(string root)
+    {
+        try
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+        catch (IOException)
+        {
+            // Harmless leftover.
+        }
+    }
+}
