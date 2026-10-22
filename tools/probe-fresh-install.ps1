@@ -53,7 +53,12 @@ param(
     [int] $Duration = 180
 )
 
-$ErrorActionPreference = 'Stop'
+# 'Continue', not 'Stop': the external tools this script drives (pktmon, etl2txt) write
+# diagnostics to stderr and return non-zero for harmless cases. Under PowerShell 5.1 a 'Stop'
+# preference turns the first such line into a NativeCommandError that kills the whole run -
+# which is exactly what happened on the first attempt ("数据包监视器没有运行" from pktmon stop).
+# Failures that actually matter are checked explicitly instead.
+$ErrorActionPreference = 'Continue'
 
 # ---------------------------------------------------------------- helpers
 
@@ -167,29 +172,63 @@ $pktmonEtl = Join-Path $OutputDir 'probe.etl'
 $pktmonTxt = Join-Path $OutputDir 'probe.txt'
 $captureActive = $false
 
+# pktmon writes diagnostics to stderr and returns non-zero for harmless cases (no session
+# running, driver not loaded). Under PowerShell 5.1 with $ErrorActionPreference = 'Stop' the
+# first line of that stderr becomes a NativeCommandError and terminates the script, so the
+# preference is relaxed for the duration of the call and the exit code is inspected instead.
+function Invoke-PktMon {
+    param([string[]] $Arguments)
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & pktmon @Arguments 2>&1
+        $exit = $LASTEXITCODE
+        return @{ Ok = ($exit -eq 0); Output = (($output | Out-String).Trim()) }
+    }
+    catch {
+        return @{ Ok = $false; Output = $_.Exception.Message }
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
 if ($isElevated) {
     Write-Step "Starting packet capture (TLS connections only, no payload)"
 
-    # Stop a leftover session from a previous run; ignore the failure if there is none.
-    & pktmon stop *> $null
+    # A leftover session from a previous run would make start fail.
+    $null = Invoke-PktMon -Arguments @('stop')
     Start-Sleep -Milliseconds 400
 
-    try {
-        # -c captures packets; the filter limits it to TCP 443 so the ETL stays small.
-        & pktmon start --capture --pkt-size 64 -f $pktmonEtl `
-            -m real-time --comp nics 2>&1 | Out-Null
+    # Only the TCP 443 filter keeps the ETL small enough to decode.
+    $null = Invoke-PktMon -Arguments @('filter', 'remove')
+    $filterResult = Invoke-PktMon -Arguments @('filter', 'add', '-p', '443')
+    if (-not $filterResult.Ok) {
+        Write-Host "    filter add failed: $($filterResult.Output)" -ForegroundColor Yellow
+    }
 
-        # pktmon needs a filter to stay small; add it separately so a failure is visible.
-        & pktmon filter remove *> $null
-        & pktmon filter add -p 443 *> $null
+    $startResult = Invoke-PktMon -Arguments @(
+        'start', '--capture', '--pkt-size', '64', '--file-name', $pktmonEtl, '--comp', 'nics'
+    )
 
+    if ($startResult.Ok) {
         $captureActive = $true
         Write-Note "Capturing to $pktmonEtl"
     }
-    catch {
-        Write-Host "    pktmon could not start: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Note "Continuing with file observation only."
+    else {
+        # Packet capture is a bonus, not a requirement: the file timeline alone answers the
+        # question (does Patch.mpk appear, and where). Common causes are a driver that is not
+        # loaded, a security product blocking it, or Windows running pktmon without the
+        # Network Capture component.
+        Write-Host "    pktmon could not start: $($startResult.Output)" -ForegroundColor Yellow
+        Write-Note "Continuing with file observation only - that is enough for the main question."
     }
+}
+else {
+    Write-Host ""
+    Write-Host "  Not elevated: packet capture skipped (file observation still runs)." -ForegroundColor Yellow
+    Write-Note "The file timeline alone answers whether the base packages are downloadable."
 }
 
 # ---------------------------------------------------------------- watch loop
@@ -309,17 +348,27 @@ $duration = [int]$stopwatch.Elapsed.TotalSeconds
 
 if ($captureActive) {
     Write-Step "Stopping packet capture"
-    try {
-        & pktmon stop *> $null
-        Start-Sleep -Milliseconds 600
-        & pktmon filter remove *> $null
-        if (Test-Path -LiteralPath $pktmonEtl) {
-            & pktmon etl2txt $pktmonEtl -o $pktmonTxt *> $null
+
+    $stopResult = Invoke-PktMon -Arguments @('stop')
+    if (-not $stopResult.Ok) {
+        Write-Host "    pktmon stop: $($stopResult.Output)" -ForegroundColor Yellow
+    }
+
+    Start-Sleep -Milliseconds 600
+    $null = Invoke-PktMon -Arguments @('filter', 'remove')
+
+    if (Test-Path -LiteralPath $pktmonEtl) {
+        $decodeResult = Invoke-PktMon -Arguments @('etl2txt', $pktmonEtl, '-o', $pktmonTxt)
+        if ($decodeResult.Ok -and (Test-Path -LiteralPath $pktmonTxt)) {
             Write-Note "Decoded to $pktmonTxt"
         }
+        else {
+            Write-Host "    Could not decode the capture: $($decodeResult.Output)" -ForegroundColor Yellow
+            Write-Note "The ETL is kept at $pktmonEtl (decode it with: pktmon etl2txt <etl> -o <txt>)"
+        }
     }
-    catch {
-        Write-Host "    Could not decode the capture: $($_.Exception.Message)" -ForegroundColor Yellow
+    else {
+        Write-Host "    No capture file was produced." -ForegroundColor Yellow
     }
 }
 
@@ -391,7 +440,13 @@ foreach ($name in $interesting) {
 if ($seen.Keys | Where-Object { $_ -like '*Patch*.mpk' }) {
     $patchCount = @($seen.Keys | Where-Object { $_ -like '*.mpk' }).Count
     $summary.Add("Base packages   : APPEARED ($patchCount .mpk files)")
-    $summary.Add("  => The base packages ARE downloadable; the URLs are in network.txt.")
+    $summary.Add("  => The base packages ARE downloadable.")
+    if ($hosts.Count -gt 0) {
+        $summary.Add("     Destinations are in network.txt; resolve them to get the URL shape.")
+    }
+    else {
+        $summary.Add("     No capture was taken - run elevated with pktmon working to get the hosts.")
+    }
 }
 elseif ($newFiles -eq 0) {
     $summary.Add("Base packages   : NOTHING was written to the probe directory")
