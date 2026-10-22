@@ -56,6 +56,7 @@ public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
 
     private List<NewsItem> _newsItems = [];
     private List<CarouselItem> _carouselItems = [];
+    private List<SocialItem> _socialItems = [];
 
     /// <summary>
     ///     Creates the news API.
@@ -68,7 +69,7 @@ public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
     }
 
     /// <summary>An entry of the remote manifest, before its detail document is fetched.</summary>
-    public sealed record NoticeEntry(string Id, string Url, bool IsBanner, long Begin, long End);
+    public sealed record NoticeEntry(string Id, string Url, bool IsBanner, bool IsSocial, string Channel, long Begin, long End);
 
     /// <summary>The detail document of one entry.</summary>
     public sealed record NoticeDetail(string Title, string Date, string Link, List<string> Images);
@@ -76,6 +77,18 @@ public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
     private sealed record NewsItem(string Title, string Description, string Url, string Date, LauncherNewsEntryType Type);
 
     private sealed record CarouselItem(string Description, string ImagePath, string ClickUrl);
+
+    /// <summary>A social media channel of the game (WeChat, Bilibili, ...), with its QR artwork.</summary>
+    private sealed record SocialItem(string Description, string ImageUrl, string ClickUrl);
+
+    /// <summary>
+    ///     The element names the manifest uses for the social media channels. Their entry documents publish the
+    ///     QR artwork of the channel, which is what the host shows in its social sidebar.
+    /// </summary>
+    private static readonly string[] SocialEntryMarkers =
+    [
+        "vx", "wechat", "officialvx", "bilibili", "tiktok", "xhs", "dashen", "smartapp", "qqgroup", "weibo", "douyin"
+    ];
 
     /// <inheritdoc/>
     protected override HttpClient ApiResponseHttpClient
@@ -100,6 +113,7 @@ public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
 
             _newsItems = BuildNews(entries, details);
             _carouselItems = BuildCarousel(entries, details);
+            _socialItems = BuildSocial(entries, details);
 
             SharedStatic.InstanceLogger?.LogInformation(
                 "[NeteaseGamesNews] {News} news entries and {Carousel} carousel entries from {Manifest} manifest entries",
@@ -171,11 +185,40 @@ public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
     /// <inheritdoc/>
     public override void GetSocialMediaEntries(out nint handle, out int count, out bool isDisposable, out bool isAllocated)
     {
-        // The social media entries of the manifest are links without an icon the host could render.
-        handle = 0;
-        count = 0;
-        isDisposable = false;
-        isAllocated = false;
+        if (_socialItems.Count == 0)
+        {
+            handle = 0;
+            count = 0;
+            isDisposable = false;
+            isAllocated = false;
+            return;
+        }
+
+        count = _socialItems.Count;
+        PluginDisposableMemory<LauncherSocialMediaEntry> memory =
+            PluginDisposableMemory<LauncherSocialMediaEntry>.Alloc(count);
+
+        for (int i = 0; i < count; i++)
+        {
+            SocialItem item = _socialItems[i];
+
+            // The artwork the entry publishes is the QR code of the channel (WeChat, Bilibili, ...), so it is
+            // handed over as the QR image. The icon is not published separately: the host falls back to the QR
+            // image for the button when no icon is set.
+            if (!string.IsNullOrEmpty(item.ImageUrl))
+            {
+                memory[i].WriteQrImage(item.ImageUrl);
+                memory[i].WriteIcon(item.ImageUrl);
+            }
+
+            memory[i].WriteDescription(item.Description);
+            memory[i].WriteQrImageDescription(item.Description);
+            memory[i].WriteClickUrl(item.ClickUrl);
+        }
+
+        handle = memory.AsSafePointer();
+        isDisposable = true;
+        isAllocated = true;
     }
 
     /// <summary>
@@ -257,7 +300,8 @@ public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
             return;
         }
 
-        entries.Add(new NoticeEntry(id, url.Trim(), isBanner, begin, end));
+        string channel = item.Name.LocalName;
+        entries.Add(new NoticeEntry(id, url.Trim(), isBanner, IsSocialEntry(channel), channel, begin, end));
     }
 
     private static long ReadTimestamp(string? value)
@@ -485,6 +529,92 @@ public partial class NeteaseGamesLauncherApiNews : LauncherApiNewsBase
         return items;
     }
 
+    /// <summary>
+    ///     Whether a manifest element describes a social media channel (WeChat, Bilibili, ...).
+    /// </summary>
+    /// <param name="elementName">The element name of the manifest, e.g. <c>vxItem</c>.</param>
+    public static bool IsSocialEntry(string elementName)
+    {
+        if (string.IsNullOrEmpty(elementName))
+        {
+            return false;
+        }
+
+        foreach (string marker in SocialEntryMarkers)
+        {
+            if (elementName.Contains(marker, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    ///     Builds the social media sidebar from the entries the manifest marks as channels.
+    ///     <para>
+    ///         The entry documents publish the QR artwork of the channel (for example the WeChat QR code) plus the
+    ///         target the channel opens; both are handed to the host, which renders the sidebar.
+    ///     </para>
+    /// </summary>
+    private static List<SocialItem> BuildSocial(List<NoticeEntry> entries, Dictionary<string, NoticeDetail> details)
+    {
+        List<SocialItem> items = [];
+        foreach (NoticeEntry entry in entries)
+        {
+            if (!entry.IsSocial || !details.TryGetValue(entry.Url, out NoticeDetail? detail))
+            {
+                continue;
+            }
+
+            string description = detail.Title.Length > 0 ? detail.Title : DescribeChannel(entry.Channel, entry.Id);
+            string image = detail.Images.Count > 0 ? detail.Images[0] : string.Empty;
+            string clickUrl = detail.Link.Length > 0 ? detail.Link : string.Empty;
+
+            // Without any artwork or target there is nothing the sidebar could show.
+            if (image.Length == 0 && clickUrl.Length == 0)
+            {
+                continue;
+            }
+
+            items.Add(new SocialItem(description, image, clickUrl));
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    ///     Builds a readable description of a channel from its element name, since the entry documents of the
+    ///     social channels carry an empty title (<c>vxItem</c> is the WeChat channel, <c>bilibiliItem</c> the
+    ///     Bilibili one, ...).
+    /// </summary>
+    /// <param name="channel">The element name of the manifest, e.g. <c>vxItem</c>.</param>
+    /// <param name="id">The id of the entry, used when the element name is not known.</param>
+    public static string DescribeChannel(string channel, string id)
+    {
+        string name = channel.Replace("Item", string.Empty, StringComparison.OrdinalIgnoreCase).ToLowerInvariant();
+        string label = name switch
+        {
+            "vx" or "officialvx" => "官方微信",
+            "bilibili"           => "哔哩哔哩",
+            "tiktok" or "douyin" => "抖音",
+            "xhs"                => "小红书",
+            "qqgroup"            => "QQ 群",
+            "dashen"             => "大神",
+            "smartapp"           => "网易大神 App",
+            "weibo"              => "微博",
+            _                    => string.Empty
+        };
+
+        if (label.Length > 0)
+        {
+            return label;
+        }
+
+        int separator = id.IndexOf(':');
+        return separator >= 0 && separator + 1 < id.Length ? $"官方渠道 #{id[(separator + 1)..]}" : "官方渠道";
+    }
     private static List<CarouselItem> BuildCarousel(List<NoticeEntry> entries,
         Dictionary<string, NoticeDetail> details)
     {

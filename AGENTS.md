@@ -92,7 +92,7 @@ tools\Indexer.exe Hi3Helper.Plugin.SoR\publish\Release
 ## 尚未完成（改动前必读）
 
 1. **引擎载荷只按大小校验**（网易 64 位 hash 算法未定位）。
-2. 社交图标 / Logo 叠加 / 视频背景未做（参考 PW 与 Hypergryph 的实现）。
+2. Logo 叠加（`GetLogoOverlayEntries`）未做；视频背景**不适用**——游戏与启动器都没有视频资源。
 3. 进度粒度只到“文件数”，未细到当前阶段/当前文件。
 
 > ⚠️ **曾经的错误结论（已纠正，别再犯）**：`patchlist` 的 `common`/`windows64_common` 段有 231,619 条
