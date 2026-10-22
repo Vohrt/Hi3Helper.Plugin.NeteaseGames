@@ -112,6 +112,17 @@ public sealed class NeteaseGamesDownloadPlan
     /// </summary>
     public string? LauncherRecord { get; init; }
 
+    /// <summary>
+    ///     Base packages a fresh installation would need but cannot download.
+    ///     <para>
+    ///         The content host serves only the patch shards; the base packages (<c>Patch.mpk</c>,
+    ///         <c>ResourceExA..</c>) are not part of any manifest the plugin can read and are not downloadable.
+    ///         When this is not empty the installation has to be created by the official launcher first, and the
+    ///         installer must refuse rather than report a completed installation that cannot start.
+    ///     </para>
+    /// </summary>
+    public IReadOnlyList<string> MissingBasePackages { get; set; } = [];
+
     /// <summary>The staging directory every object is downloaded into.</summary>
     public string StagingDirectory { get; init; } = string.Empty;
 

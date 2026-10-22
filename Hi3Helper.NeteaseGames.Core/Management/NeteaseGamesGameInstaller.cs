@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Runtime.InteropServices.Marshalling;
 using System.Threading;
@@ -195,6 +196,18 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
                 "[NeteaseGames] Nothing to download ({Mode}), the installation is complete", mode);
             progressStateDelegate?.Invoke(InstallProgressState.Completed);
             return;
+        }
+
+        // A fresh installation cannot be completed by downloading patch shards alone: the base packages are not
+        // served by the content host. Failing here is deliberate - reporting success would leave the player with
+        // an installation that cannot start.
+        if (plan.MissingBasePackages.Count > 0)
+        {
+            throw new NotSupportedException(
+                "A fresh installation needs the base packages (" +
+                string.Join(", ", plan.MissingBasePackages) +
+                "), which the content host does not serve. Install the game with the official launcher once, " +
+                "then use this plugin to keep it updated.");
         }
 
         progressStateDelegate?.Invoke(InstallProgressState.Download);
@@ -394,12 +407,62 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
 
         plan.AssignStaging(stagingDirectory);
 
+        // A fresh installation needs the base packages (Patch.mpk, Patch1..123, ResourceExA..) as well, and
+        // those are NOT served by the content host: every section answers 404 for them, the patch list does not
+        // describe them, and the engine payload is only ~1.3 GB while they are ~59 GB. They come from the
+        // vendor's own full installation. Refusing here is what keeps the host from reporting a completed
+        // installation that cannot start.
+        if (mode == NeteaseGamesPlanMode.Install)
+        {
+            IReadOnlyList<string> missingBase = FindMissingBasePackages(gamePath);
+            if (missingBase.Count > 0)
+            {
+                plan.MissingBasePackages = missingBase;
+                SharedStatic.InstanceLogger?.LogWarning(
+                    "[NeteaseGames] A fresh installation needs {Count} base packages that the content host does not serve ({Sample}). The installation has to be created by the official launcher first.",
+                    missingBase.Count, string.Join(", ", missingBase.Take(5)));
+            }
+        }
+
         SharedStatic.InstanceLogger?.LogInformation(
             "[NeteaseGames] Plan ({Mode}): {Packages} packages, {Indexes} indexes, {Loose} loose files, {Size} bytes",
             mode, plan.PackageCount, plan.IndexCount, plan.LooseCount, plan.TotalSize);
 
         return plan;
     }
+
+    /// <summary>
+    ///     Returns the base packages (<c>Patch.mpk</c>, <c>Patch&lt;n&gt;.mpk</c>, <c>ResourceExA..</c>) that are
+    ///     missing from an installation.
+    ///     <para>
+    ///     These are the packages the game cannot start without, and unlike the patch shards they are not part
+    ///     of any manifest the plugin can read - the content host answers 404 for them. They are only created by
+    ///     the vendor's own full installation.
+    ///     </para>
+    /// </summary>
+    /// <param name="gamePath">The installation root.</param>
+    public static IReadOnlyList<string> FindMissingBasePackages(string gamePath)
+    {
+        List<string> missing = [];
+        string patchDirectory = Path.Combine(gamePath, NeteaseGamesPaths.PatchDirectoryRelativePath);
+
+        // The very first package every installation has; without it the game cannot read its content.
+        if (!File.Exists(Path.Combine(patchDirectory, BasePackageName)))
+        {
+            missing.Add(BasePackageName);
+        }
+
+        // The resource packages the engine looks up by name (ResourceExA..ResourceExF and their numbered parts).
+        if (!File.Exists(Path.Combine(patchDirectory, "ResourceExA.mpk")))
+        {
+            missing.Add("ResourceExA.mpk");
+        }
+
+        return missing;
+    }
+
+    /// <summary>The first content package of every installation; it is not part of any patch list.</summary>
+    public const string BasePackageName = "Patch.mpk";
 
     /// <summary>
     ///     Whether a local file is already the expected one. Only the size can be checked (the vendor hash

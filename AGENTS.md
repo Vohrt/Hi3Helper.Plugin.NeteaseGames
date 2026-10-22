@@ -90,10 +90,15 @@ tools\Indexer.exe Hi3Helper.Plugin.SoR\publish\Release
 | 模式 | 触发 | 计划内容 |
 |---|---|---|
 | `Update` | 宿主“更新”按钮 | 与本地 patchlist 比对，只下**变更的分片/索引** |
-| `Install` | 目录里没有游戏 | **全部分片 + 索引 + 引擎载荷**（0 → 完整安装） |
+| `Install` | 目录里没有游戏 | 全部补丁分片 + 索引 + 引擎载荷（1.8 GB），但**缺基础包 ⇒ 拒绝执行** |
 | `Repair` | 已装游戏点“安装”/修复 | 对账**磁盘**：本地清单认为当前的分片，只校验存在与大小，缺/截断才补 |
 
 - `Repair` **不追新版本**：追新是 `Update` 的职责。两者在“本机已落后”时会给出相同结果，属正常。
+- **全新安装不可行**（已实测确认）：基础包 `Patch.mpk` / `Patch1-123.mpk` / `ResourceExA*.mpk`
+  = **123 个 / 59.10 GB**，占完整安装的 92%。内容服务器对它们**所有 section 都返回 404**，
+  任何清单也不描述它们，mini-pack 只有 1.3 GB（装不下）。⇒ `Install` 检测到缺失即抛
+  `NotSupportedException`，绝不能让宿主报告“安装完成”而游戏起不来。
+  详见 `docs/re/launcher-install-logic.md`。
 - 三者的 `TotalSize` 必须与 `GetGameDownloadedSizeAsync` 同源，否则宿主算错剩余空间。
 
 ## 尚未完成（改动前必读）
