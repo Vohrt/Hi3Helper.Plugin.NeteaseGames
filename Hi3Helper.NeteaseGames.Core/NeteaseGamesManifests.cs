@@ -388,6 +388,32 @@ public sealed record NeteaseGamesPatchManifest
     /// <summary>The engine version the patch belongs to.</summary>
     public string EngineVersion { get; init; } = string.Empty;
 
+    /// <summary>
+    ///     <c>@metadata@.@bigpatchopen@</c> - whether this round may rewrite the base shard tier
+    ///     (<c>Patch.mpk</c> / <c>Patch1..127</c>).
+    ///     <para>
+    ///         Measured <c>true</c> on the live branch during 2026-10-22 and 2026-10-23, and the official launcher
+    ///         did rewrite ten base shards in exactly those rounds. <b>The plugin cannot download that tier</b>
+    ///         (see the protocol document), so the switch is surfaced to the caller instead of being ignored: a
+    ///         round that turns it on must not be reported as complete.
+    ///     </para>
+    /// </summary>
+    public bool IsBigPatchOpen { get; init; }
+
+    /// <summary>
+    ///     <c>@metadata@.@is_full@</c> - whether this round ships a full package rather than a delta.
+    /// </summary>
+    public bool IsFullPackage { get; init; }
+
+    /// <summary>
+    ///     <c>@metadata@.@bigpatchmd5@</c> - the fingerprint of the base shard tier (raw token, may be empty).
+    ///     <para>
+    ///         Comparing it between two rounds tells whether the base tier changed even when the patch version did
+    ///         not (the value measured on 2026-10-23 is <c>6128997482385675719</c>).
+    ///     </para>
+    /// </summary>
+    public string BigPatchMd5 { get; init; } = string.Empty;
+
     /// <summary>The version of the patch list (the hash of the remote file list, line 1).</summary>
     public ulong PatchListHash { get; init; }
 
@@ -441,6 +467,9 @@ public sealed record NeteaseGamesPatchManifest
 
             string baseVersion = string.Empty;
             string engineVersion = string.Empty;
+            bool isBigPatchOpen = false;
+            bool isFullPackage = false;
+            string bigPatchMd5Token = string.Empty;
             if (root.TryGetProperty("@metadata@", out JsonElement metadata))
             {
                 if (metadata.TryGetProperty("@base_version@", out JsonElement baseElement))
@@ -457,6 +486,33 @@ public sealed record NeteaseGamesPatchManifest
                     engineElement.ValueKind == JsonValueKind.String)
                 {
                     engineVersion = engineElement.GetString() ?? string.Empty;
+                }
+
+                // `@bigpatchopen@` is a branch level switch that lets a patch touch the base shard tier
+                // (Patch.mpk / Patch1..127), measured on 2026-10-23 with the value `true`. `@is_full@` marks a
+                // full-package round. Neither tier is reachable by the plugin (see PROTOCOL-VERIFIED §5.4), so
+                // both are surfaced instead of being silently ignored: a round with the switch on may rewrite
+                // shards the plugin cannot fetch, and completing it would leave a half-updated installation.
+                if (metadata.TryGetProperty("@bigpatchopen@", out JsonElement bigPatchElement) &&
+                    bigPatchElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    isBigPatchOpen = bigPatchElement.GetBoolean();
+                }
+
+                if (metadata.TryGetProperty("@is_full@", out JsonElement fullElement) &&
+                    fullElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    isFullPackage = fullElement.GetBoolean();
+                }
+
+                if (metadata.TryGetProperty("@bigpatchmd5@", out JsonElement bigPatchMd5))
+                {
+                    bigPatchMd5Token = bigPatchMd5.ValueKind switch
+                    {
+                        JsonValueKind.Number => bigPatchMd5.GetRawText(),
+                        JsonValueKind.String => bigPatchMd5.GetString() ?? string.Empty,
+                        _                    => string.Empty
+                    };
                 }
 
                 // Line 3 is authoritative; the metadata copy is only used when the line is missing.
@@ -478,7 +534,10 @@ public sealed record NeteaseGamesPatchManifest
             result = result with
             {
                 BaseVersion = baseVersion,
-                EngineVersion = engineVersion
+                EngineVersion = engineVersion,
+                IsBigPatchOpen = isBigPatchOpen,
+                IsFullPackage = isFullPackage,
+                BigPatchMd5 = bigPatchMd5Token
             };
         }
         catch (JsonException)
