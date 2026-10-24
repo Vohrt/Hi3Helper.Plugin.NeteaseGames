@@ -22,7 +22,8 @@ Hi3Helper.Plugin.SoR/          薄插件：Sea of Remnants（程序集 SoR.dll�
 Hi3Helper.NeteaseGames.Tests/  单元测试（解析器 / 签名器 / 路径安全 / 计划模型）
 Hi3Helper.Plugin.Core/         Collapse 上游 ABI（子模块）
 tools/Indexer.exe              生成插件 manifest 与发布包
-docs/re/netease-protocol.md    协议（唯一参考，只写实测结论）
+docs/PROTOCOL-VERIFIED.md      协议（唯一参考，只写实测结论）
+docs/NETEASE-FIX-PLAN.md       2026-10-24 实测复核 + 修复计划
 ```
 
 ## 当前状态
@@ -32,21 +33,25 @@ docs/re/netease-protocol.md    协议（唯一参考，只写实测结论）
 | 检测安装 | ✅ 已验证 | 注册表 `OB_ywzh_launcher_PC` 的 `AdditionalPaths` |
 | 本地版本 | ✅ 已验证 | `patchmd5` **第 3 行**（补丁版本）；`pkgversion` 是基础包版本，另一维度 |
 | 远端版本 / 更新判定 | ✅ 已验证 | 远端清单**第 3 行**；判定 =「远端包大小 vs 磁盘大小」 |
-| 下载目录 | ✅ 已验证 | 远端清单**第 0 行**；**不是** `@metadata@.@base_version@`（实测差 9 个包） |
-| 直接启动（不经官方启动器） | ✅ 真机验证 | 见 `docs/re/netease-protocol.md` |
+| 增量包目录 | ✅ 已验证 | 远端清单**第 0 行**；**不是** `@metadata@.@base_version@`（实测差 9 个包） |
+| **基础包（`big_`）目录** | ✅ 已验证 | **`@base_version@`**，不是第 0 行（两者用途相反，见 PROTOCOL-VERIFIED §5.4） |
+| 直接启动（不经官方启动器） | ✅ 真机验证 | 见 `docs/PROTOCOL-VERIFIED.md` |
 | 背景 / 图标 | ✅ 已修 | 内嵌 base64（本地路径会让宿主无限转圈） |
 | 公告 / 轮播 | ✅ 已修 | 逐条抓取公告 JSON 取真实标题与轮播图 |
-| 插件自更新 | ✅ | 指向 `release` 分支 |
-| **增量更新** | ✅ 已验证 | 分片/索引粒度；`Char/…` 是虚拟路径**不是**磁盘文件 |
-| **修复（Repair）** | ✅ 已验证 | 与 Update 同一判定：缺失/截断/偏大的包重新下载 |
+| 插件自更新 | ⚠️ 待实测 | 指向 `release` 分支；NativeAOT 下自报版本号需在 Windows 上确认（见 FIX-PLAN §4.2） |
+| **增量更新** | ✅ 已修（2026-10-24） | 按 `@bigpatchmd5@` 指纹判断基础层是否真的变化；`@bigpatchopen@` 本身不再阻断 |
+| **修复（Repair）** | ✅ 已修（2026-10-24） | 基础层截断检测按 `max(start+size)` 判定；真机 0 误报，300 MB 假分卷能准确报出 |
 | **社交侧栏** | ✅ 已实现 | 8 个官方渠道，带二维码图与跳转 |
 | 视频背景 | ⛔ 不适用 | 游戏与启动器都没有视频资源（仅 `Splash.bmp` 静态图） |
-| **全新安装（0 → 全量）** | 🚧 **待完成** | 基础包（144 个 / 64 GB）不在 patchlist，内容服务器全部 404；官方走 `bigpatch` 通道，**该通道未定位**。当前 `Install` 直接拒绝 |
+| **全新安装（0 → 全量）** | 🚧 **待完成** | 基础层 = **128 个分卷 / 64.23 GB**（`Patch.mpk` + `Patch1..127`）；`big_` 通道已定位（`@base_version@`），但分卷重建规则未还原 ⇒ `Install` 仍直接拒绝 |
 | 下载并发 / 重试 | ✅ | 4 路并行、`ArrayPool` 缓冲、每主机 2 次指数退避 |
 
 > **计划模式**（`NeteaseGamesPlanMode`）：`Update` 与 `Repair` 判定相同（远端大小 vs 磁盘大小）；
 > `Install` **不支持**，抛 `NotSupportedException`。
 > 远端清单取不到时抛异常——空计划意味着"未知"，不能当成"已完成"。
+
+> ⚠ **2026-10-24 实测复核见 `docs/NETEASE-FIX-PLAN.md`**：本表在此之前有多处与真机不符
+> （基础包数量写成 144、`big_` 通道写成"未定位"、增量更新写成"已验证"），已按实测更正。
 
 ## 构建
 

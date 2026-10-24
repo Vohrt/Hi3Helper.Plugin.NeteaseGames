@@ -166,6 +166,28 @@ public sealed class NeteaseGamesLocalState
     public string ShaderVersion { get; init; } = string.Empty;
 
     /// <summary>
+    ///     The content version the installation was last brought to, read from the first line of the local
+    ///     <c>patchmd5</c> record.
+    ///     <para>
+    ///         The official launcher stores the remote manifest verbatim, so this is the content directory the
+    ///         files on disk came from. It is compared with the remote one to decide whether side files such as
+    ///         <c>shadercachelist_dx12.txt</c> have to be re-fetched.
+    ///     </para>
+    /// </summary>
+    public string ContentVersion { get; init; } = string.Empty;
+
+    /// <summary>
+    ///     The fingerprint of the base shard tier the installation was brought to, read from
+    ///     <c>@metadata@.@bigpatchmd5@</c> of the local <c>patchmd5</c> record.
+    ///     <para>
+    ///         The remote manifest announces the same field for the current round. Comparing the two is how a
+    ///         round is judged to be a pure delta even when <c>@bigpatchopen@</c> is on (which it always is on the
+    ///         live branch) - see <c>NeteaseGamesGameInstaller.VerifyBaseTierCompletable</c>.
+    ///     </para>
+    /// </summary>
+    public string BigPatchMd5 { get; init; } = string.Empty;
+
+    /// <summary>
     ///     Reads the local state from a game installation directory.
     ///     <para>
     ///         <b>Version sources, in the order the official launcher uses them.</b>
@@ -205,6 +227,8 @@ public sealed class NeteaseGamesLocalState
         string latestEngineVersion = ReadText(Path.Combine(patchDirectory, NeteaseGamesPaths.LatestEngineVersionFileName));
         string gameVersionToken = ReadText(Path.Combine(patchDirectory, NeteaseGamesPaths.GameVersionFileName));
         string shaderVersion = string.Empty;
+        string contentVersion = string.Empty;
+        string bigPatchMd5 = string.Empty;
 
         // The launcher's own record: a verbatim copy of the remote patchmd5, whose fourth line is the installed
         // @private_res_version@ and whose @metadata@ block repeats it.
@@ -227,6 +251,14 @@ public sealed class NeteaseGamesLocalState
                 {
                     patchVersion = recorded;
                 }
+
+                // Line 0 of the same record is the content version the installation was brought to; it decides
+                // whether side files of that round are already on disk.
+                contentVersion = ReadPatchMd5ContentVersion(text);
+
+                // The same record carries the fingerprint of the base tier that round installed. It is the only
+                // way to tell "big patch round with an unchanged base tier" from "the base tier really moved".
+                bigPatchMd5 = ReadPatchMd5BaseFingerprint(text);
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException or FormatException)
             {
@@ -265,7 +297,13 @@ public sealed class NeteaseGamesLocalState
                     patchVersion = parsedPatch;
                 }
 
-                if (root.TryGetProperty("engine_version", out JsonElement engineValue) &&
+                // ⚠ Do NOT overwrite the engine version with this value when the installation has its own
+                // `Engine\Config\Built.version`. The two are written by different components and have different
+                // shapes: `Built.version` is the launcher's "(timestamp)_(hash)_release" while versiondata.json
+                // carries the client's "_r0000_(hash)" suffix. Mixing them made HasEngineUpdate report an update
+                // on every start (measured 2026-10-24) and re-planned 277 engine files / 1.14 GB each round.
+                if (string.IsNullOrEmpty(engineVersion) &&
+                    root.TryGetProperty("engine_version", out JsonElement engineValue) &&
                     engineValue.ValueKind == JsonValueKind.String)
                 {
                     engineVersion = engineValue.GetString() ?? engineVersion;
@@ -290,8 +328,90 @@ public sealed class NeteaseGamesLocalState
             EngineVersion = engineVersion,
             LatestEngineVersion = latestEngineVersion,
             GameVersionToken = gameVersionToken,
-            ShaderVersion = shaderVersion
+            ShaderVersion = shaderVersion,
+            ContentVersion = contentVersion,
+            BigPatchMd5 = bigPatchMd5
         };
+    }
+
+    /// <summary>
+    ///     Reads the content version from the first line of a decrypted <c>patchmd5</c> record.
+    ///     <para>
+    ///         The line is the directory the launcher downloaded that round's objects from (17 digits on the live
+    ///         branch). Anything that is not a plain numeric stamp is rejected, so a malformed record cannot be
+    ///         mistaken for a version.
+    ///     </para>
+    /// </summary>
+    /// <param name="text">The decrypted text of a patchmd5 file.</param>
+    /// <returns>The content version, or an empty string when it cannot be read.</returns>
+    public static string ReadPatchMd5ContentVersion(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        int bodyStart = text.IndexOf('{');
+        string header = bodyStart >= 0 ? text[..bodyStart] : text;
+        string[] lines = header.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        string candidate = lines[0].Trim('"');
+        return NeteaseGamesPatchManifest.IsContentVersion(candidate) ? candidate : string.Empty;
+    }
+
+    /// <summary>
+    ///     Reads <c>@metadata@.@bigpatchmd5@</c> - the fingerprint of the base shard tier - from a decrypted
+    ///     <c>patchmd5</c> record.
+    ///     <para>
+    ///         This is the value the round installed to disk was built against. Comparing it with the remote one is
+    ///         what tells a "big patch round that only touched the delta tier" apart from a round that really
+    ///         rewrites <c>Patch.mpk</c> / <c>Patch1..127</c>.
+    ///     </para>
+    /// </summary>
+    /// <param name="text">The decrypted text of a patchmd5 file.</param>
+    /// <returns>The fingerprint as stored (a decimal token), or an empty string when absent.</returns>
+    public static string ReadPatchMd5BaseFingerprint(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        int index = text.IndexOf("\"@bigpatchmd5@\"", StringComparison.Ordinal);
+        if (index < 0)
+        {
+            return string.Empty;
+        }
+
+        int colon = text.IndexOf(':', index);
+        if (colon < 0)
+        {
+            return string.Empty;
+        }
+
+        int start = colon + 1;
+        while (start < text.Length && char.IsWhiteSpace(text[start]))
+        {
+            start++;
+        }
+
+        bool quoted = start < text.Length && text[start] == '"';
+        if (quoted)
+        {
+            start++;
+        }
+
+        int end = start;
+        while (end < text.Length && (char.IsAsciiDigit(text[end]) || text[end] == '-'))
+        {
+            end++;
+        }
+
+        return end > start ? text[start..end] : string.Empty;
     }
 
     /// <summary>
@@ -598,16 +718,24 @@ public sealed class NeteaseGamesLocalState
         string body = bodyStart >= 0 ? manifest[bodyStart..] : manifest;
         string header = bodyStart >= 0 ? manifest[..bodyStart] : string.Empty;
 
-        // Keep the manifest's own hash line when it is present; only the sync timestamp and the version change.
-        string hash = "0";
+        // The launcher keeps the remote header verbatim: measured on 2026-10-23, line 0 of the on-disk record and
+        // line 0 of the remote manifest are the same 17-digit stamp (`20261023122834919`), so it is the CONTENT
+        // VERSION, not a sync timestamp. Replacing it with a local timestamp (which an earlier revision did)
+        // destroyed the only record of which content directory the installation came from.
         string[] lines = header.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        string contentVersion = "0";
+        if (lines.Length >= 1 && NeteaseGamesPatchManifest.IsContentVersion(lines[0]))
+        {
+            contentVersion = lines[0];
+        }
+
+        // Keep the manifest's own hash line when it is present; only the version changes.
+        string hash = "0";
         if (lines.Length >= 2)
         {
             hash = lines[1];
         }
-
-        // A timestamp in the same shape the launcher writes (yyyyMMddHHmmssfff).
-        string stamp = DateTime.Now.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture);
 
         // The body carries the version twice: in @metadata@ and (for completeness) in the normal block. Both are
         // replaced so a reader that consults either field agrees.
@@ -615,7 +743,7 @@ public sealed class NeteaseGamesLocalState
         body = ReplaceJsonNumber(body, "\"@private_patch_version@\"", version);
         body = ReplaceJsonNumber(body, "\"@private_script_version@\"", version);
 
-        return $"{stamp}\n{hash}\n0\n{version}\n{body}";
+        return $"{contentVersion}\n{hash}\n0\n{version}\n{body}";
     }
 
     /// <summary>Replaces the number of a JSON property, leaving the text untouched when it is absent.</summary>
@@ -695,7 +823,15 @@ public sealed class NeteaseGamesLocalState
             }
 
             string json = File.ReadAllText(versionDataPath);
-            json = ReplaceJsonNumber(json, "\"package_version\"", version);
+
+            // `versiondata.json` carries TWO independent versions and they must not be conflated:
+            //
+            //   package_version  6521279     the base package version (a different counter, `pkgversion`)
+            //   patch_version    "6589318"   the patch version this update advanced
+            //
+            // Writing the patch version into `package_version` (which an earlier revision did) corrupts the
+            // client's own bookkeeping: an update only advances the patch counter, never the base package one.
+            // Measured on disk 2026-10-23: {"package_version":6521279,"patch_version":"6589318", ...}.
             json = ReplaceJsonString(json, "\"patch_version\"", version.ToString(CultureInfo.InvariantCulture));
             File.WriteAllText(versionDataPath, json);
         }

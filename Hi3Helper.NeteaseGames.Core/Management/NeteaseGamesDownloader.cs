@@ -24,7 +24,14 @@ public enum NeteaseGamesDownloadKind
     Index,
 
     /// <summary>A regular game file that is stored below the installation root.</summary>
-    LooseFile
+    LooseFile,
+
+    /// <summary>
+    ///     A file the launcher keeps next to the packages but that the patch list does not describe
+    ///     (<c>shadercachelist_dx12.txt</c>). It lives in the patch directory and is written last before the
+    ///     version record.
+    /// </summary>
+    SideFile
 }
 
 /// <summary>A single object of a download plan.</summary>
@@ -44,6 +51,23 @@ public sealed class NeteaseGamesDownloadItem
 
     /// <summary>The expected size of the object, or 0 when it is unknown.</summary>
     public long ExpectedSize { get; init; }
+
+    /// <summary>
+    ///     The hosts that may serve this object, in order, or <c>null</c> for the default content hosts.
+    ///     <para>
+    ///         ⚠ The engine payload (mini pack) lives on <b>a different host</b> than the patch packages
+    ///         (<c>h74.gdl.netease.com</c> vs <c>h74.gph.netease.com</c>) and it <b>requires</b> the URL signature;
+    ///         the content hosts answer 404 for it. The downloader therefore cannot pick a host globally - every
+    ///         item has to say where it comes from.
+    ///     </para>
+    /// </summary>
+    public IReadOnlyList<string>? Hosts { get; init; }
+
+    /// <summary>
+    ///     Whether the request has to carry the <c>key1</c>/<c>key2</c> signature. The content hosts accept both
+    ///     signed and unsigned requests; the engine payload host answers <c>403</c> without it.
+    /// </summary>
+    public bool RequiresSignature { get; init; }
 
     /// <summary>The absolute path the object is staged at.</summary>
     public string StagedPath { get; set; } = string.Empty;
@@ -99,14 +123,33 @@ public sealed class NeteaseGamesDownloadPlan
     /// <summary>The objects of the plan.</summary>
     public List<NeteaseGamesDownloadItem> Items { get; } = [];
 
-    /// <summary>The package version the installation is updated to, or 0 when the version must not change.</summary>
+    /// <summary>
+    ///     The <b>patch</b> version the installation is brought to (line 3 of the remote manifest), or 0 when the
+    ///     version must not change.
+    ///     <para>
+    ///         This is the only counter a delta update advances. It is written to
+    ///         <c>patchmd5_windows64_normal.txt</c> (the official launcher's own record) and to
+    ///         <c>Documents\versiondata.json</c>'s <c>patch_version</c>.
+    ///     </para>
+    /// </summary>
+    public long PatchVersion { get; init; }
+
+    /// <summary>
+    ///     The <b>base package</b> version (<c>pkgversion</c>), or 0 when it must not change.
+    ///     <para>
+    ///         ⚠ This is a different counter from <see cref="PatchVersion"/>. A delta update never advances it;
+    ///         only a round that actually rewrites the base tier may. Writing the patch version here (which an
+    ///         earlier revision did) overwrote 6,521,279 with 6,593,596 and corrupted the official launcher's
+    ///         bookkeeping. Leave it 0 unless the base tier changed.
+    ///     </para>
+    /// </summary>
     public long PackageVersion { get; init; }
 
     /// <summary>
     ///     The decrypted remote patch manifest (<c>OB_patchmd5_*.txt</c>) the plan was built from.
     ///     <para>
     ///         It is written back as the launcher's own record once the update succeeded, with its version fields
-    ///         replaced by <see cref="PackageVersion"/> - the official launcher reads that file, not
+    ///         replaced by <see cref="PatchVersion"/> - the official launcher reads that file, not
     ///         <c>pkgversion</c>.
     ///     </para>
     /// </summary>
@@ -239,9 +282,10 @@ public sealed class NeteaseGamesDownloadPlan
 /// <summary>
 ///     Downloads the NetEase content payload.
 ///     <para>
-///         Every content request has to be signed (see <see cref="NeteaseGamesUrlSigner" />), otherwise the
-///         edge answers with 403. Downloads resume from a partial file and are verified by MD5 when the
-///         server announces one.
+///         The host and the signing requirement are properties of the <b>object</b>, not of the downloader:
+///         patch packages come from the content hosts (<c>h74.gph.netease.com</c> and its mirrors, signed or not),
+///         while the engine payload lives on <c>h74.gdl.netease.com</c> and answers <c>403</c> without the
+///         signature. Downloads resume from a partial file and are verified by MD5 when the server announces one.
 ///     </para>
 /// </summary>
 public sealed class NeteaseGamesDownloader
@@ -274,13 +318,26 @@ public sealed class NeteaseGamesDownloader
     /// <summary>Builds the candidate URLs for a content path.</summary>
     /// <param name="relativePath">The path relative to the content root.</param>
     public IReadOnlyList<Uri> BuildUris(string relativePath)
+        => BuildUris(relativePath, hosts: null, requiresSignature: false);
+
+    /// <summary>
+    ///     Builds the candidate URLs for a content path on the given hosts.
+    /// </summary>
+    /// <param name="relativePath">The path relative to the content root.</param>
+    /// <param name="hosts">The hosts to try, in order, or <c>null</c> for the default content hosts.</param>
+    /// <param name="requiresSignature">Whether to append the <c>key1</c>/<c>key2</c> signature.</param>
+    public IReadOnlyList<Uri> BuildUris(string relativePath, IReadOnlyList<string>? hosts, bool requiresSignature)
     {
         List<Uri> uris = [];
         DateTimeOffset now = DateTimeOffset.UtcNow;
-        foreach (string root in _contentRoots)
+        IEnumerable<string> roots = hosts is { Count: > 0 }
+            ? hosts.Select(h => h.Contains("://", StringComparison.Ordinal) ? h.TrimEnd('/') + "/" : "https://" + h.TrimEnd('/') + "/")
+            : _contentRoots;
+
+        foreach (string root in roots)
         {
             string url = root.TrimEnd('/') + "/" + relativePath.TrimStart('/');
-            uris.Add(new Uri(NeteaseGamesUrlSigner.Sign(url, now)));
+            uris.Add(new Uri(requiresSignature ? NeteaseGamesUrlSigner.Sign(url, now) : url));
         }
 
         return uris;
@@ -325,7 +382,7 @@ public sealed class NeteaseGamesDownloader
         }
 
         Exception? lastError = null;
-        foreach (Uri uri in BuildUris(item.RelativePath))
+        foreach (Uri uri in BuildUris(item.RelativePath, item.Hosts, item.RequiresSignature))
         {
             for (int attempt = 1; attempt <= AttemptsPerHost; attempt++)
             {

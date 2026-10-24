@@ -21,9 +21,10 @@ namespace Hi3Helper.NeteaseGames.Core;
 ///             <item>download every changed object into the staging directory,</item>
 ///             <item>move the packages into place,</item>
 ///             <item>move the package indexes and the loose files into place,</item>
-///             <item>write the package version (the commit point of the whole operation).</item>
+///             <item>write the package version (only when the base tier changed) and then the launcher's record
+///                 with the new <b>patch</b> version - the commit point of the whole operation.</item>
 ///         </list>
-///         The version file is never written when any object failed, so an interrupted or partial update can
+///         The version files are never written when any object failed, so an interrupted or partial update can
 ///         never be mistaken for a finished one.
 ///     </para>
 /// </summary>
@@ -139,7 +140,35 @@ public static class NeteaseGamesUpdateApplier
             }
         }
 
-        // The version file is the commit point: written only when every object is in place.
+        // Side files (the shader cache list) live next to the packages but are not described by the patch list.
+        // They are written after the payload and before the version record, so an interrupted run never leaves a
+        // new version next to a side file of the previous one.
+        foreach (NeteaseGamesDownloadItem item in plan.Items)
+        {
+            if (item.Kind != NeteaseGamesDownloadKind.SideFile)
+            {
+                continue;
+            }
+
+            try
+            {
+                MoveIntoPlace(item, patchDirectory);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                SharedStatic.InstanceLogger?.LogError(
+                    "[NeteaseGames] Could not write the side file '{Path}': {Msg}", item.RelativePath, ex.Message);
+                return NeteaseGamesApplyResult.ApplyFailed(item.RelativePath);
+            }
+        }
+
+        // The version record is the commit point: written only when every object is in place.
+        //
+        // The two counters are written separately on purpose:
+        //   pkgversion   the BASE PACKAGE version - only a round that rewrote the base tier may advance it
+        //   patchmd5     the official launcher's record - its fourth line is the PATCH version
+        // An earlier revision fed the patch version into both, which overwrote 6,521,279 with 6,593,596 and
+        // corrupted the launcher's bookkeeping even though Collapse (which reads patchmd5) saw nothing wrong.
         if (plan.PackageVersion > 0)
         {
             try
@@ -153,12 +182,15 @@ public static class NeteaseGamesUpdateApplier
                     "[NeteaseGames] Could not write the package version: {Msg}", ex.Message);
                 return NeteaseGamesApplyResult.ApplyFailed(NeteaseGamesPaths.PackageVersionFileName);
             }
+        }
 
+        if (plan.PatchVersion > 0)
+        {
             // The official launcher does not look at `pkgversion`: its record is `patchmd5_*.txt`, a verbatim
             // copy of the remote OB_patchmd5 whose fourth line carries the installed @private_res_version@.
             // Leaving that file at the previous version made the launcher (and our own reader) believe the update
             // had not happened. It is rewritten from the manifest that was just installed.
-            NeteaseGamesLocalState.WriteLauncherRecord(patchDirectory, plan.PackageVersion, plan.LauncherRecord,
+            NeteaseGamesLocalState.WriteLauncherRecord(patchDirectory, plan.PatchVersion, plan.LauncherRecord,
                 gameDirectory);
         }
 

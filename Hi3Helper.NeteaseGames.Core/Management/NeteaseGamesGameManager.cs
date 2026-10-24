@@ -36,7 +36,7 @@ public partial class NeteaseGamesGameManager : GameManagerBase
     private NeteaseGamesMiniPackManifest? _remoteManifest;
     private NeteaseGamesPatchManifest? _remotePatchManifest;
     private string? _remotePatchManifestText;
-    private long _remotePackageVersion;
+    private long _remotePatchVersion;
     private bool _remoteProbed;
     private bool _hasEngineUpdate;
 
@@ -84,15 +84,19 @@ public partial class NeteaseGamesGameManager : GameManagerBase
     }
 
     /// <summary>
-    ///     The package version announced by the remote patch manifest.
+    ///     The <b>patch</b> version announced by the remote patch manifest (line 3).
+    ///     <para>
+    ///         The name is historical: it is not the base package version. It is the counter an update advances
+    ///         and the one the host compares against <c>CurrentGameVersion</c>.
+    ///     </para>
     /// </summary>
-    public long RemotePackageVersion
+    public long RemotePatchVersion
     {
         get
         {
             lock (_syncRoot)
             {
-                return _remotePackageVersion;
+                return _remotePatchVersion;
             }
         }
     }
@@ -263,7 +267,9 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             return;
         }
 
-        // The engine version of the installation is the one of the engine build.
+        // The engine version of the installation is the one of the engine build (`Engine\Config\Built.version`).
+        // `latest_engine_ver` is only a fallback: it records the timestamp of the last applied mini pack, not the
+        // build identity.
         string local = state.EngineVersion;
         if (string.IsNullOrEmpty(local))
         {
@@ -271,13 +277,53 @@ public partial class NeteaseGamesGameManager : GameManagerBase
         }
 
         bool update = !string.IsNullOrEmpty(local) &&
-                      !string.Equals(local, manifest.CurrentVersion, StringComparison.Ordinal) &&
-                      !string.Equals(local, manifest.EngineVersion, StringComparison.Ordinal);
+                      !EngineVersionsMatch(local, manifest.CurrentVersion) &&
+                      !EngineVersionsMatch(local, manifest.EngineVersion);
 
         lock (_syncRoot)
         {
             _hasEngineUpdate = update;
         }
+    }
+
+    /// <summary>
+    ///     Compares two engine version tokens, tolerating the suffix forms the two writers use.
+    ///     <para>
+    ///         `Built.version` is <c>261014173721_4a476f25b_release</c> and the mini pack announces the same value,
+    ///         while the game client's <c>versiondata.json</c> records
+    ///         <c>261014173721_4a476f25b_release_r0000_6ad03d31</c> - the same build with a revision tail. A plain
+    ///         string comparison reports "different build" for what is in fact the same engine.
+    ///     </para>
+    /// </summary>
+    /// <param name="local">The local token.</param>
+    /// <param name="remote">The remote token.</param>
+    public static bool EngineVersionsMatch(string? local, string? remote)
+    {
+        if (string.IsNullOrEmpty(local) || string.IsNullOrEmpty(remote))
+        {
+            return false;
+        }
+
+        string left = StripEngineRevision(local);
+        string right = StripEngineRevision(remote);
+        if (string.Equals(left, right, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        // Some shapes only carry the numeric build stamp (e.g. `latest_engine_ver` = 202610151759); accept a
+        // prefix match in that case so a timestamp against a full token does not look like a build change.
+        return left.StartsWith(right, StringComparison.Ordinal) || right.StartsWith(left, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    ///     Removes the client's <c>_r0000_(hash)</c> revision tail from an engine version token.
+    /// </summary>
+    /// <param name="version">The token.</param>
+    public static string StripEngineRevision(string version)
+    {
+        int marker = version.IndexOf("_r", StringComparison.OrdinalIgnoreCase);
+        return marker > 0 ? version[..marker] : version;
     }
 
     /// <summary>
@@ -315,18 +361,18 @@ public partial class NeteaseGamesGameManager : GameManagerBase
                 UpdateEngineState(NeteaseGamesLocalState.Read(CurrentGameInstallPath));
             }
 
-            long remotePackageVersion = await FetchRemotePackageVersionAsync(token).ConfigureAwait(false);
-            if (remotePackageVersion > 0)
+            long remotePatchVersion = await FetchRemotePatchVersionAsync(token).ConfigureAwait(false);
+            if (remotePatchVersion > 0)
             {
                 lock (_syncRoot)
                 {
-                    _remotePackageVersion = remotePackageVersion;
+                    _remotePatchVersion = remotePatchVersion;
                     // Only mark the probe as complete once the authoritative version is known: a timeout or
                     // a transient failure must be retried the next time the host asks.
                     _remoteProbed = true;
                 }
 
-                ApiGameVersion = new GameVersion(0, 0, (int)remotePackageVersion, 0);
+                ApiGameVersion = new GameVersion(0, 0, (int)remotePatchVersion, 0);
                 EnsureLocalVersionProbed();
             }
         }
@@ -354,7 +400,7 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             NeteaseGamesContentEndpoints.GetEnginePayloadHosts(),
             token);
 
-    private async Task<long> FetchRemotePackageVersionAsync(CancellationToken token)
+    private async Task<long> FetchRemotePatchVersionAsync(CancellationToken token)
     {
         Uri uri = NeteaseGamesEndpoints.GetManifestUri(
             NeteaseGamesEndpoints.PatchListBaseUrl,

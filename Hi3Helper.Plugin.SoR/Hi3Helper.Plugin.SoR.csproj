@@ -18,7 +18,9 @@
         <Company>CollapsePlugin</Company>
         <Authors>$(Company).</Authors>
         <Copyright>Copyright 2026 $(Company)</Copyright>
-        <Version>0.4.0</Version>
+        <!-- The self updater compares this against the manifest on the release branch: a fix that is deployed
+             under an unchanged version can never reach a machine that already has that version. -->
+        <Version>0.4.1</Version>
         <Configurations>Debug;Release;DebugNoReflection;ReleaseNoReflection</Configurations>
         <Title>Hi3Helper.Plugin.SoR</Title>
     </PropertyGroup>

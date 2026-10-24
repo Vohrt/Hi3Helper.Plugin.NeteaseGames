@@ -89,7 +89,7 @@ public class DownloadPlanTests
     [Fact]
     public void Plan_ReportsSizesAndCountsConsistently()
     {
-        NeteaseGamesDownloadPlan plan = new() { PackageVersion = 123, StagingDirectory = Path.GetTempPath() };
+        NeteaseGamesDownloadPlan plan = new() { PatchVersion = 123, PackageVersion = 456, StagingDirectory = Path.GetTempPath() };
         plan.Items.Add(new NeteaseGamesDownloadItem
         {
             RelativePath = "v/mpk_script/script.mpkinfo",
