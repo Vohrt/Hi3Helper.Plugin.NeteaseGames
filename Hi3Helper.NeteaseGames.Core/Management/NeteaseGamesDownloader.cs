@@ -181,6 +181,20 @@ public sealed class NeteaseGamesDownloadPlan
     /// </summary>
     public NeteaseGamesBaseAssemblyPlan? BaseAssembly { get; set; }
 
+    /// <summary>
+    ///     The shader tier work of a fresh installation, or <c>null</c> when the plan has none.
+    ///     <para>
+    ///         The shader tier (<c>ResourceExA.mpk</c> + <c>ResourceExA1..16.mpk</c>, 4,989,773,170 bytes on the live
+    ///         branch) is not part of the patch list either; it is assembled from the <c>big_shader</c> chunk pool the
+    ///         same way the base tier is assembled from <c>big_common</c>. Leaving it out is what made a fresh
+    ///         installation produce an installation the game cannot read.
+    ///     </para>
+    /// </summary>
+    public NeteaseGamesBaseAssemblyPlan? ShaderAssembly { get; set; }
+
+    /// <summary>The shader cache list of the round, when it was fetched (it carries the per-resource hash and size).</summary>
+    public NeteaseGamesShaderCacheList? ShaderCacheList { get; set; }
+
     /// <summary>The staging directory every object is downloaded into.</summary>
     public string StagingDirectory { get; init; } = string.Empty;
 
@@ -196,17 +210,29 @@ public sealed class NeteaseGamesDownloadPlan
     public int LooseCount => CountOf(NeteaseGamesDownloadKind.LooseFile);
 
     /// <summary>Whether the plan is empty (nothing to do).</summary>
-    public bool IsEmpty => Items.Count == 0 && (BaseAssembly is null || BaseAssembly.Steps.Count == 0);
+    public bool IsEmpty => Items.Count == 0 &&
+                           (BaseAssembly is null || BaseAssembly.Steps.Count == 0) &&
+                           (ShaderAssembly is null || ShaderAssembly.Steps.Count == 0);
 
     /// <summary>The number of bytes that are already on disk.</summary>
     public long DownloadedSize => Interlocked.Read(ref _downloaded);
 
     /// <summary>The total number of bytes to download.</summary>
+    /// <remarks>
+    ///     The base / shader assembly contributes only its chunk bytes: the standalone loose chunks it also carries
+    ///     are added to <see cref="Items" /> as ordinary objects, and counting them in both places overstated the
+    ///     total by 119,967 bytes on the live branch (measured 2026-10-26).
+    /// </remarks>
     public long TotalSize
     {
         get
         {
-            long total = BaseAssembly?.TotalSize ?? 0;
+            long total = BaseAssembly?.AssemblySize ?? 0;
+            if (ShaderAssembly is not null)
+            {
+                total += ShaderAssembly.AssemblySize;
+            }
+
             foreach (NeteaseGamesDownloadItem item in Items)
             {
                 total += item.ExpectedSize;

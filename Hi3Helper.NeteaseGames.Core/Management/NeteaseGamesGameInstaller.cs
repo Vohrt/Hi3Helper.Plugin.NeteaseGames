@@ -79,6 +79,19 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         _httpClient = NeteaseGamesHttp.CreateClient();
     }
 
+    /// <summary>
+    ///     The installer has nothing to initialise: the manifests are fetched by the plan that needs them.
+    ///     <para>
+    ///         ⚠ This override is <b>not</b> optional. The base <see cref="InitializableTask.InitAsync" /> is a
+    ///         placeholder that sleeps ten seconds and returns 69420, and the host awaits it before every install,
+    ///         update, uninstall and preload (<c>PluginGameInstallWrapper</c> calls <c>InitPluginComAsync</c> at
+    ///         four places). Without this override every one of those operations started ten seconds late -
+    ///         measured 2026-10-26: the base implementation returned 69420 after 10,012 ms.
+    ///     </para>
+    /// </summary>
+    /// <param name="token">Cancel token.</param>
+    protected override Task<int> InitAsync(CancellationToken token) => Task.FromResult(0);
+
     /// <inheritdoc/>
     protected override async Task<long> GetGameSizeAsyncInner(GameInstallerKind gameInstallerKind, CancellationToken token)
     {
@@ -209,23 +222,24 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
                 "Check the network connection and try again.");
         }
 
-        // A fresh installation needs the base tier assembled from big_common / big_shader chunks; this work
-        // replaces the old IsFreshInstallUnsupported failure. When mode == Install, the plan will include
-        // base-tier work items after the planner generates them in BuildPlanAsync.
+        // A fresh installation needs both tiers assembled from their chunk pools (big_common / big_shader). The flag
+        // is only set when neither pool manifest could be fetched, so it means "the plan is incomplete", not
+        // "installing is unsupported".
         if (plan.IsFreshInstallUnsupported)
         {
             SharedStatic.InstanceLogger?.LogWarning("[NeteaseGames] Fresh install still unsupported");
             throw new NotSupportedException(
-                "A fresh installation is not supported yet: the base packages (Patch.mpk, Patch1..127, " +
-                "ResourceExA..) are not part of the patch list and cannot be downloaded. Install the game with " +
-                "the official launcher once, then use this plugin to keep it updated.");
+                "The installation cannot be planned: neither base tier manifest could be fetched. Check the " +
+                "network connection and try again.");
         }
 
         // A round that really rewrites the base tier cannot be finished by the plugin. `@bigpatchopen@` alone is
         // not the signal for that (it is a branch flag that is always on); the base tier fingerprint decides.
         // Applying only the delta tier and then writing the new version would report a finished update while the
         // installation is actually half updated, so such a run is refused up front.
-        if (mode == NeteaseGamesPlanMode.Update)
+        // Repair decides exactly the same work as Update, so it has to pass the same gate; applying it to Update
+        // only let the "repair" button run the half-update this check exists to prevent (measured 2026-10-26).
+        if (mode is NeteaseGamesPlanMode.Update or NeteaseGamesPlanMode.Repair)
         {
             VerifyBaseTierCompletable(manager.RemotePatchManifest, plan,
                 NeteaseGamesLocalState.Read(gamePath));
@@ -278,7 +292,38 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
 
             // The game reads a shard THROUGH the index, so the index has to describe the layout that was just
             // produced - not the vendor's. Writing it is the step that makes the assembled bytes addressable.
-            WriteBaseIndex(patchDirectory, assembly);
+            WriteBaseIndex(patchDirectory, assembly, plan.ShaderCacheList, plan);
+        }
+
+        // The shader tier is the second pool of shards (ResourceExA.mpk + ResourceExA1..16.mpk). It is not part of
+        // the patch list and has no public per-shard endpoint, so a fresh installation has to assemble it too;
+        // without it the game has no compiled shaders and the tier's index is missing entirely.
+        if (plan.ShaderAssembly is { Steps.Count: > 0 } shaderAssembly)
+        {
+            string patchDirectory = Path.Combine(gamePath, NeteaseGamesPaths.PatchDirectoryRelativePath);
+            string shaderStaging = Path.Combine(patchDirectory, BaseStagingDirectoryName);
+
+            SharedStatic.InstanceLogger?.LogInformation(
+                "[NeteaseGames] Assembling the shader tier: {Chunks} chunks into {Shards} shards ({Size} bytes)",
+                shaderAssembly.Steps.Count, shaderAssembly.ShardCount, shaderAssembly.AssemblySize);
+
+            string? failedChunk = await NeteaseGamesBaseAssembler.AssembleAsync(
+                shaderAssembly,
+                patchDirectory,
+                shaderStaging,
+                downloader,
+                bytes => ReportProgress(progressDelegate, bytes, totalBytes, 0, totalFiles),
+                token,
+                NeteaseGamesBaseLayoutPlanner.GetShaderShardFileName).ConfigureAwait(false);
+
+            if (failedChunk is not null)
+            {
+                throw new IOException(
+                    $"The shader tier could not be assembled ('{failedChunk}'). Run the installation again to " +
+                    "resume; the shards already written are kept.");
+            }
+
+            WriteShaderIndex(patchDirectory, shaderAssembly, plan.ShaderCacheList);
         }
 
         NeteaseGamesApplyResult result = await NeteaseGamesUpdateApplier.ApplyAsync(
@@ -326,8 +371,12 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
     {
         string gamePath = EnsureAndGetGamePath();
 
+        // A plan built before the remote manifests were probed carries no items and is flagged "remote list
+        // unavailable"; caching it made every later size query answer 0 forever, because the cache is keyed on the
+        // game path alone (measured 2026-10-26: size 0 after a successful probe, while a direct BuildPlanAsync on the
+        // same installation returned 16,753,304 bytes).
         NeteaseGamesDownloadPlan? cached = _cachedPlan;
-        if (cached is not null && _cachedPlanGamePath == gamePath)
+        if (cached is not null && _cachedPlanGamePath == gamePath && !cached.IsRemoteListUnavailable)
         {
             return cached;
         }
@@ -365,10 +414,16 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         NeteaseGamesDownloadPlan plan = new()
         {
             StagingDirectory = stagingDirectory,
-            // An update advances the PATCH version only. The base package version (`pkgversion`) is left at 0
-            // because this plan never rewrites the base tier - writing the patch version there would corrupt the
-            // official launcher's record (measured: 6,521,279 overwritten with 6,593,596).
-            PatchVersion = mode == NeteaseGamesPlanMode.Install ? 0 : manager.RemotePatchVersion,
+            // Both a delta update and a fresh installation record the PATCH version (line 3 of the remote manifest).
+            // A fresh installation used to leave it at 0, which made the first state query after the install answer
+            // "0.0.0" against the remote version - so the host immediately offered an update for the installation it
+            // had just finished, and the next run walked into the base tier gate (measured 2026-10-26 on a simulated
+            // post-install tree).
+            //
+            // `pkgversion` stays 0: it is the BASE PACKAGE version, a different counter, and this plan never rewrites
+            // the base tier. Writing the patch version there corrupted the launcher's record (measured: 6,521,279
+            // overwritten with 6,593,596).
+            PatchVersion = manager.RemotePatchVersion,
             // The launcher's own record is rebuilt from this manifest once the update succeeded.
             LauncherRecord = manager.RemotePatchManifestText
         };
@@ -507,6 +562,15 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         {
             AppendShaderCacheList(plan, gamePath, manifest.ContentVersion,
                 NeteaseGamesLocalState.Read(gamePath));
+
+            // A fresh installation has no local patch list at all, and every later update compares against it. The
+            // content host serves the same document the launcher keeps locally (measured 2026-10-26: the file at the
+            // installed content version is byte-for-byte the local patchlist_windows64_normal.txt), so it is fetched
+            // once here and written under the launcher's own name.
+            if (isFreshInstall)
+            {
+                AppendPatchList(plan, manifest.ContentVersion);
+            }
         }
 
         plan.AssignStaging(stagingDirectory);
@@ -569,6 +633,12 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
 
                     plan.BaseAssembly = assembly;
                     AppendBaseTierItems(plan, assembly);
+
+                    // The shader tier is a second pool with the same rules but a different manifest name and a
+                    // different shard file prefix. It is planned only for a fresh installation: an installation
+                    // that already has it keeps it, and the tier is not described by the patch list.
+                    await BuildShaderAssemblyPlanAsync(manager, plan, contentVersion, manifest.BaseVersion, token)
+                        .ConfigureAwait(false);
                 }
             }
         }
@@ -1022,6 +1092,237 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
     }
 
     /// <summary>
+    ///     Plans the shader tier of a fresh installation.
+    ///     <para>
+    ///         The tier is the second shard pool: <c>ResourceExA.mpk</c> + <c>ResourceExA1..16.mpk</c>
+    ///         (4,989,773,170 bytes / 17 files on the live branch) plus its index <c>ResourceExA.patchinfo</c>
+    ///         (173,861 rows). It is not part of the patch list, and no content host serves the shards directly, so
+    ///         it has to be assembled from <c>big_shader</c> chunks exactly like the base tier.
+    ///     </para>
+    ///     <para>
+    ///         Two measured rules carry over from the base tier unchanged:
+    ///     </para>
+    ///     <list type="bullet">
+    ///         <item>
+    ///             <b>A chunk is a gapless concatenation of its resources in list order.</b> Verified on 2026-10-26:
+    ///             <c>dx12_916</c> 137/137, <c>dx12_920</c> 4/4, <c>dx12_1</c> 518/518 and <c>dx12_500</c> 150/150
+    ///             resources slice back out of the live <c>ResourceExA*.mpk</c> byte for byte.
+    ///         </item>
+    ///         <item>
+    ///             <b>The directory split is the same.</b> The 3 chunks this round re-cut (<c>dx12_916/917/918</c>)
+    ///             and the one it added (<c>dx12_920</c>) are served only under <c>big_{line 0}</c>; the other 916
+    ///             are served only under <c>big_{@base_version@}</c> (measured: every sampled chunk 404s on the
+    ///             other directory).
+    ///         </item>
+    ///     </list>
+    ///     <para>
+    ///         Unlike the base tier, every shader chunk is size-consistent (920/920 measured) and no path is listed
+    ///         twice, so nothing is skipped. The per-resource size and hash come from the shader cache list
+    ///         (<c>shadercachelist_dx12.txt</c>), whose 173,859 entries match the live index exactly.
+    ///     </para>
+    /// </summary>
+    /// <param name="manager">The game manager (for the manifests).</param>
+    /// <param name="plan">The plan to extend.</param>
+    /// <param name="contentVersion">The line-0 directory version.</param>
+    /// <param name="baseVersion">The <c>@base_version@</c> directory version, or an empty string.</param>
+    /// <param name="token">Cancel token.</param>
+    private static async Task BuildShaderAssemblyPlanAsync(NeteaseGamesGameManager manager,
+        NeteaseGamesDownloadPlan plan, string contentVersion, string? baseVersion, CancellationToken token)
+    {
+        NeteaseGamesShaderCacheList? cacheList = await manager.FetchShaderCacheListAsync(contentVersion, token)
+            .ConfigureAwait(false);
+
+        if (cacheList is null)
+        {
+            // Without the per-resource sizes the pool cannot be laid out at all: a chunk is placed by summing the
+            // sizes of the resources it lists, and an unknown size would silently produce a wrong offset.
+            SharedStatic.InstanceLogger?.LogError(
+                "[NeteaseGames] The shader cache list could not be read; the shader tier cannot be planned");
+            plan.IsFreshInstallUnsupported = true;
+            return;
+        }
+
+        plan.ShaderCacheList = cacheList;
+
+        NeteaseGamesBigPatchList? line0 = await manager.FetchShaderPoolAsync(contentVersion, token)
+            .ConfigureAwait(false);
+
+        NeteaseGamesBigPatchList? older = null;
+        if (!string.IsNullOrEmpty(baseVersion) &&
+            !string.Equals(baseVersion, contentVersion, StringComparison.Ordinal))
+        {
+            older = await manager.FetchShaderPoolAsync(baseVersion, token).ConfigureAwait(false);
+        }
+
+        if (line0 is null && older is null)
+        {
+            SharedStatic.InstanceLogger?.LogError(
+                "[NeteaseGames] Neither shader pool manifest could be fetched; the shader tier cannot be planned");
+            plan.IsFreshInstallUnsupported = true;
+            return;
+        }
+
+        Dictionary<string, long> sizes = cacheList.ToSizeMap();
+
+        // Same ordering rule as the base tier: the line-0 copy first, then any chunk only the base copy lists.
+        //
+        // ⚠ The section of a chunk is the name of the object's own <i>property</i> in the manifest, and the shader
+        // manifest calls it `big_file_list` while the content host serves the chunks under `big_shader`. Using the
+        // parsed section verbatim therefore asked for `big_{v}/big_file_list/dx12_920`, which answers 404 (measured
+        // 2026-10-26), so every chunk is re-sectioned to the directory the host actually uses.
+        List<NeteaseGamesBigChunk> ordered = [];
+        HashSet<(string Section, string Name)> seen = [];
+        foreach (NeteaseGamesBigPatchList? source in new[] { line0, older })
+        {
+            if (source is null)
+            {
+                continue;
+            }
+
+            foreach (NeteaseGamesBigChunk chunk in source.Chunks.Values)
+            {
+                NeteaseGamesBigChunk normalized = chunk with { Section = NeteaseGamesContentEndpoints.BigShaderSection };
+                if (seen.Add((normalized.Section, normalized.Name)))
+                {
+                    ordered.Add(normalized);
+                }
+            }
+        }
+
+        NeteaseGamesBaseLayout layout = NeteaseGamesBaseLayoutPlanner.Plan(ordered, sizes);
+
+        foreach (NeteaseGamesBigChunk skipped in layout.SkippedChunks)
+        {
+            SharedStatic.InstanceLogger?.LogWarning(
+                "[NeteaseGames] Shader chunk '{Chunk}' is skipped: its announced size disagrees with its resources",
+                skipped.Name);
+        }
+
+        // A chunk this round re-cut or added is served by the line-0 directory, everything else by the base one.
+        // Keyed by name only: the section was rewritten above, and the two manifests agree on it anyway.
+        Dictionary<string, string> provider = new(StringComparer.Ordinal);
+        if (older is not null && !string.IsNullOrEmpty(baseVersion))
+        {
+            foreach (((string Section, string Name) key, NeteaseGamesBigChunk chunk) in older.Chunks)
+            {
+                bool unchanged = line0 is not null &&
+                                 line0.Chunks.TryGetValue(key, out NeteaseGamesBigChunk? current) &&
+                                 current.Size == chunk.Size &&
+                                 current.Paths.SequenceEqual(chunk.Paths);
+
+                provider[key.Name] = unchanged ? baseVersion : contentVersion;
+            }
+        }
+
+        if (line0 is not null)
+        {
+            foreach ((string Section, string Name) key in line0.Chunks.Keys)
+            {
+                provider.TryAdd(key.Name, contentVersion);
+            }
+        }
+
+        NeteaseGamesBaseAssemblyPlan assembly = new()
+        {
+            ShardCount = layout.ShardCount
+        };
+
+        foreach (NeteaseGamesBaseAssembler.Step step in NeteaseGamesBaseAssembler.BuildSteps(layout, ordered, string.Empty))
+        {
+            string source = provider.TryGetValue(step.Chunk.Name, out string? version)
+                ? version
+                : contentVersion;
+
+            assembly.Steps.Add(step with { SourceVersion = source });
+        }
+
+        assembly.Placements.AddRange(layout.Placements);
+
+        SharedStatic.InstanceLogger?.LogInformation(
+            "[NeteaseGames] Shader tier plan: {Chunks} chunks, {Shards} shards, {Size} bytes, {Skipped} skipped",
+            assembly.Steps.Count, layout.ShardCount, assembly.AssemblySize, layout.SkippedChunks.Count);
+
+        plan.ShaderAssembly = assembly;
+    }
+
+    /// <summary>
+    ///     Writes <c>LocalData\Patch\ResourceExA.patchinfo</c> for the shader layout the assembly produced.
+    ///     <para>
+    ///         The file is the shader counterpart of <c>Patch.mpkinfo</c>: a SQLite database whose table is
+    ///         <c>info1</c> (not <c>info0</c>) with two meta rows, <c>max_index</c> and <c>status</c>. Measured on the
+    ///         live file: 173,861 rows (173,859 resources + 2 directory placeholders <c>Shader</c> and
+    ///         <c>Shader/dx12</c>), <c>max_index=16</c>, and
+    ///         <c>status={"compacting": false, "suffix": 1, "extra": "", "delete_compacting": false}</c>.
+    ///     </para>
+    ///     <para>
+    ///         Every row carries the real per-resource hash from the shader cache list, not 0: measured, all 173,859
+    ///         hashes of the live index equal the values in <c>shadercachelist_dx12.txt</c>.
+    ///     </para>
+    /// </summary>
+    /// <param name="patchDirectory">The <c>LocalData\Patch</c> directory.</param>
+    /// <param name="assembly">The shader assembly that was written.</param>
+    /// <param name="cacheList">The shader cache list that supplied the hashes.</param>
+    private static void WriteShaderIndex(string patchDirectory, NeteaseGamesBaseAssemblyPlan assembly,
+        NeteaseGamesShaderCacheList? cacheList)
+    {
+        List<NeteaseGamesBaseIndexWriter.Row> rows = new(assembly.Placements.Count);
+        foreach (NeteaseGamesBasePlacement placement in assembly.Placements)
+        {
+            if (placement.Size <= 0)
+            {
+                continue;
+            }
+
+            ulong hash = cacheList is not null &&
+                         cacheList.Resources.TryGetValue(placement.Path, out NeteaseGamesShaderResource resource)
+                ? resource.Hash
+                : 0;
+
+            rows.Add(new NeteaseGamesBaseIndexWriter.Row(
+                placement.Path,
+                (uint)placement.Size,
+                (ushort)placement.ShardIndex,
+                (uint)placement.Offset,
+                hash));
+        }
+
+        // The live shader index carries two placeholder rows for the directory tree (`Shader` and `Shader/dx12`),
+        // so the same placeholder rule as the base tier applies here too.
+        foreach (string directory in EnumerateDirectories(rows))
+        {
+            rows.Add(new NeteaseGamesBaseIndexWriter.Row(directory, 0, 0, 0, 0));
+        }
+
+        string indexPath = Path.Combine(patchDirectory, ShaderIndexFileName);
+        string temporary = indexPath + ".tmp";
+
+        using (FileStream stream = new(temporary, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
+        {
+            NeteaseGamesBaseIndexWriter.Write(stream, NeteaseGamesBaseIndex.ShaderTableName, rows,
+            [
+                new KeyValuePair<string, string>("max_index",
+                    (assembly.ShardCount - 1).ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                new KeyValuePair<string, string>("status", ShaderIndexStatus)
+            ]);
+        }
+
+        File.Move(temporary, indexPath, overwrite: true);
+
+        SharedStatic.InstanceLogger?.LogInformation(
+            "[NeteaseGames] Wrote {Path}: {Resources} resources + {Directories} directories across {Shards} shards",
+            indexPath, assembly.Placements.Count, rows.Count - assembly.Placements.Count, assembly.ShardCount);
+    }
+
+    /// <summary>The file name of the shader tier index.</summary>
+    public const string ShaderIndexFileName = "ResourceExA.patchinfo";
+
+    /// <summary>
+    ///     The <c>status</c> meta value of the live <c>ResourceExA.patchinfo</c> (measured 2026-10-26).
+    /// </summary>
+    public const string ShaderIndexStatus =
+        "{\"compacting\": false, \"suffix\": 1, \"extra\": \"\", \"delete_compacting\": false}";
+
+    /// <summary>
     ///     Writes <c>LocalData\Patch\Patch.mpkinfo</c> for the layout the assembly produced.
     ///     <para>
     ///         The game addresses every base resource through this index, so it must describe the shards that were
@@ -1038,11 +1339,26 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
     /// </summary>
     /// <param name="patchDirectory">The <c>LocalData\Patch</c> directory.</param>
     /// <param name="assembly">The assembly that was written.</param>
-    private static void WriteBaseIndex(string patchDirectory, NeteaseGamesBaseAssemblyPlan assembly)
+    private static void WriteBaseIndex(string patchDirectory, NeteaseGamesBaseAssemblyPlan assembly,
+        NeteaseGamesShaderCacheList? shaderCacheList, NeteaseGamesDownloadPlan plan)
     {
-        // The hash field of an index row is the vendor's 64 bit content hash, which is not implemented. The live
-        // file carries a value there and the game does not appear to validate it, but writing 0 for all rows is the
-        // honest choice: it can never be mistaken for a verified hash.
+        // The hash field is the vendor's 64 bit content hash, and for the base tier it is NOT known: the chunk hash
+        // in bigpatchlist is a hash of the chunk, not of each resource, and the patch list only covers resources the
+        // delta tier re-ships. Writing 0 for the rows whose hash cannot be sourced is the honest choice - it can
+        // never be mistaken for a verified hash.
+        //
+        // The shader tier is different: shadercachelist_dx12.txt carries the per-resource hash (measured 2026-10-26:
+        // all 173,859 values equal the live ResourceExA.patchinfo), and the base tier can reuse it for the handful of
+        // shader resources the pool also carries.
+        Dictionary<string, ulong> knownHashes = [];
+        if (shaderCacheList is not null)
+        {
+            foreach (NeteaseGamesShaderResource resource in shaderCacheList.Resources.Values)
+            {
+                knownHashes[resource.Path] = resource.Hash;
+            }
+        }
+
         List<NeteaseGamesBaseIndexWriter.Row> rows = new(assembly.Placements.Count);
         foreach (NeteaseGamesBasePlacement placement in assembly.Placements)
         {
@@ -1056,7 +1372,16 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
                 (uint)placement.Size,
                 (ushort)placement.ShardIndex,
                 (uint)placement.Offset,
-                0));
+                knownHashes.TryGetValue(placement.Path, out ulong hash) ? hash : 0));
+        }
+
+        // The live index carries one placeholder row per directory that holds resources (size 0, shard 0,
+        // offset 0, hash 0). Measured on 2026-10-26: 2,460 of them, and they are exactly the set of parent
+        // directories of the shard resources (the three standalone patch files are not counted). Leaving them out
+        // produced an index with 232,450 rows where the vendor's has 234,910.
+        foreach (string directory in EnumerateDirectories(rows))
+        {
+            rows.Add(new NeteaseGamesBaseIndexWriter.Row(directory, 0, 0, 0, 0));
         }
 
         string indexPath = Path.Combine(patchDirectory, NeteaseGamesBaseIndex.FileName);
@@ -1068,15 +1393,73 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
             [
                 new KeyValuePair<string, string>("max_index",
                     (assembly.ShardCount - 1).ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                new KeyValuePair<string, string>("extra_mpkinfo_families", "[]")
+                // The live value is the list of delta tier shards and indexes this installation knows about; it is
+                // what the launcher uses to find them. Measured: 50 entries (47 shards + 3 indexes).
+                new KeyValuePair<string, string>("extra_mpkinfo_families", BuildFamilyList(plan))
             ]);
         }
 
         File.Move(temporary, indexPath, overwrite: true);
 
         SharedStatic.InstanceLogger?.LogInformation(
-            "[NeteaseGames] Wrote {Path}: {Rows} resources across {Shards} shards",
-            indexPath, rows.Count, assembly.ShardCount);
+            "[NeteaseGames] Wrote {Path}: {Rows} rows ({Resources} resources + {Directories} directories) across " +
+            "{Shards} shards", indexPath, rows.Count, assembly.Placements.Count, rows.Count - assembly.Placements.Count,
+            assembly.ShardCount);
+    }
+
+    /// <summary>
+    ///     The distinct parent directories of the given rows, in a stable order.
+    /// </summary>
+    private static IEnumerable<string> EnumerateDirectories(IEnumerable<NeteaseGamesBaseIndexWriter.Row> rows)
+    {
+        HashSet<string> directories = new(StringComparer.Ordinal);
+        foreach (NeteaseGamesBaseIndexWriter.Row row in rows)
+        {
+            int slash = row.Path.LastIndexOf('/');
+            if (slash > 0)
+            {
+                directories.Add(row.Path[..slash]);
+            }
+        }
+
+        List<string> ordered = [.. directories];
+        ordered.Sort(StringComparer.Ordinal);
+        return ordered;
+    }
+
+    /// <summary>
+    ///     Builds the <c>extra_mpkinfo_families</c> value: the delta tier shards and indexes, as a JSON array of
+    ///     file names in the order the live installation lists them.
+    /// </summary>
+    private static string BuildFamilyList(NeteaseGamesDownloadPlan plan)
+    {
+        List<string> families = [];
+        foreach (NeteaseGamesDownloadItem item in plan.Items)
+        {
+            if (item.Kind is NeteaseGamesDownloadKind.Package or NeteaseGamesDownloadKind.Index &&
+                !families.Contains(item.TargetRelativePath, StringComparer.Ordinal))
+            {
+                families.Add(item.TargetRelativePath);
+            }
+        }
+
+        if (families.Count == 0)
+        {
+            return "[]";
+        }
+
+        System.Text.StringBuilder builder = new("[");
+        for (int i = 0; i < families.Count; i++)
+        {
+            if (i > 0)
+            {
+                builder.Append(", ");
+            }
+
+            builder.Append('"').Append(families[i]).Append('"');
+        }
+
+        return builder.Append(']').ToString();
     }
 
     /// <summary>
@@ -1126,6 +1509,31 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
     /// <param name="gamePath">The installation root.</param>
     /// <param name="contentVersion">The content version the file is served from.</param>
     /// <param name="localState">The version record read from disk.</param>
+    /// <summary>
+    ///     Adds the local patch list (<c>patchlist_windows64_normal.txt</c>) to a fresh installation's plan.
+    ///     <para>
+    ///         The launcher keeps that file next to the shards and every later update compares against it; without it
+    ///         the next run has no baseline. It is not in the patch list itself (it <i>is</i> the patch list), so it
+    ///         has to be fetched from the content version directory, where it is byte for byte the copy the launcher
+    ///         writes (measured 2026-10-26: identical MD5 at the installed content version).
+    ///     </para>
+    /// </summary>
+    /// <param name="plan">The plan to extend.</param>
+    /// <param name="contentVersion">The content version directory.</param>
+    private static void AppendPatchList(NeteaseGamesDownloadPlan plan, string contentVersion)
+    {
+        plan.Items.Add(new NeteaseGamesDownloadItem
+        {
+            RelativePath = ContentPath(contentVersion, null, NeteaseGamesContentEndpoints.PatchListMpkFileName),
+            TargetRelativePath = NeteaseGamesPaths.PatchListFileName,
+            Kind = NeteaseGamesDownloadKind.SideFile,
+            ExpectedSize = 0
+        });
+
+        SharedStatic.InstanceLogger?.LogInformation(
+            "[NeteaseGames] The local patch list will be installed from content version {Version}", contentVersion);
+    }
+
     private static void AppendShaderCacheList(NeteaseGamesDownloadPlan plan, string gamePath, string contentVersion,
         NeteaseGamesLocalState localState)
     {

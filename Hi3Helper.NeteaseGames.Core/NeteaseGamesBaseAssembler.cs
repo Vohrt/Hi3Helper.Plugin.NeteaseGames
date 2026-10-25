@@ -149,6 +149,10 @@ public static class NeteaseGamesBaseAssembler
     /// <param name="downloader">The downloader.</param>
     /// <param name="progress">Called with the number of bytes finished so far.</param>
     /// <param name="token">Cancel token.</param>
+    /// <param name="shardFileName">
+    ///     Names the shard file of a shard index. The base tier and the shader tier use different prefixes
+    ///     (<c>Patch{N}.mpk</c> vs <c>ResourceExA{N}.mpk</c>), so the caller decides; <c>null</c> means the base tier.
+    /// </param>
     /// <returns>The failing chunk name, or <c>null</c> when every chunk was assembled.</returns>
     public static async Task<string?> AssembleAsync(
         NeteaseGamesBaseAssemblyPlan plan,
@@ -156,10 +160,13 @@ public static class NeteaseGamesBaseAssembler
         string stagingDirectory,
         NeteaseGamesDownloader downloader,
         Action<long>? progress,
-        CancellationToken token)
+        CancellationToken token,
+        Func<int, string>? shardFileName = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(downloader);
+
+        shardFileName ??= NeteaseGamesBaseLayoutPlanner.GetShardFileName;
 
         Directory.CreateDirectory(shardDirectory);
         Directory.CreateDirectory(stagingDirectory);
@@ -179,7 +186,8 @@ public static class NeteaseGamesBaseAssembler
                 {
                     try
                     {
-                        return await AssembleShardAsync(shard, shardDirectory, stagingDirectory, downloader, progress, token)
+                        return await AssembleShardAsync(shard, shardDirectory, stagingDirectory, downloader, progress,
+                                token, shardFileName)
                             .ConfigureAwait(false);
                     }
                     finally
@@ -214,7 +222,8 @@ public static class NeteaseGamesBaseAssembler
         string stagingDirectory,
         NeteaseGamesDownloader downloader,
         Action<long>? progress,
-        CancellationToken token)
+        CancellationToken token,
+        Func<int, string> shardFileName)
     {
         if (steps.Count == 0)
         {
@@ -222,8 +231,7 @@ public static class NeteaseGamesBaseAssembler
         }
 
         int shardIndex = steps[0].ShardIndex;
-        string shardPath = Path.Combine(shardDirectory,
-            NeteaseGamesBaseLayoutPlanner.GetShardFileName(shardIndex));
+        string shardPath = Path.Combine(shardDirectory, shardFileName(shardIndex));
 
         // Resume: keep the longest prefix of chunks that is already on disk, byte for byte.
         long resumeOffset = 0;
@@ -395,6 +403,29 @@ public sealed class NeteaseGamesBaseAssemblyPlan
             foreach (NeteaseGamesBaseLooseChunk loose in LooseChunks)
             {
                 total += loose.Chunk.Size;
+            }
+
+            return total;
+        }
+    }
+
+    /// <summary>
+    ///     The bytes the assembly downloads, without the standalone loose chunks.
+    ///     <para>
+    ///         The loose chunks are also added to the download plan as items of their own, so counting them here as
+    ///         well made the reported total 119,967 bytes larger than the work (measured 2026-10-26 on the live
+    ///         branch). The plan reports <see cref="TotalSize" /> for its own accounting and this value for the
+    ///         progress denominator.
+    ///     </para>
+    /// </summary>
+    public long AssemblySize
+    {
+        get
+        {
+            long total = 0;
+            foreach (NeteaseGamesBaseAssembler.Step step in Steps)
+            {
+                total += step.Chunk.Size;
             }
 
             return total;

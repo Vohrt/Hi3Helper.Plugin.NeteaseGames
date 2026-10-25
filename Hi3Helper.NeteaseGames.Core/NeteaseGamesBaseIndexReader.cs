@@ -50,6 +50,13 @@ public sealed class NeteaseGamesBaseIndex
     /// </summary>
     public const string TableName = "info0";
 
+    /// <summary>
+    ///     The table name of the shader tier index (<c>ResourceExA.patchinfo</c>). Measured on 2026-10-26: the live
+    ///     file declares <c>info1(filepath, value)</c>, i.e. the shader tier uses the next table in the same schema
+    ///     rather than reusing <c>info0</c>.
+    /// </summary>
+    public const string ShaderTableName = "info1";
+
     private const int SqliteMagicLength = 16;
     private const int PageHeaderSize = 8;
     private const int TableLeaf = 0x0D;
@@ -74,7 +81,7 @@ public sealed class NeteaseGamesBaseIndex
     /// <summary>Reads the index from a <c>Patch.mpkinfo</c> file.</summary>
     /// <param name="path">The database file.</param>
     /// <returns>The index, or <c>null</c> when the file is missing, unreadable or malformed.</returns>
-    public static NeteaseGamesBaseIndex? Read(string path)
+    public static NeteaseGamesBaseIndex? Read(string path, string tableName = TableName)
     {
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
         {
@@ -84,7 +91,7 @@ public sealed class NeteaseGamesBaseIndex
         try
         {
             using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            return Read(stream);
+            return Read(stream, tableName);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentOutOfRangeException)
         {
@@ -94,9 +101,14 @@ public sealed class NeteaseGamesBaseIndex
 
     /// <summary>Reads the index from a stream positioned at the start of the database.</summary>
     /// <param name="stream">The database content.</param>
-    public static NeteaseGamesBaseIndex? Read(Stream stream)
+    /// <param name="tableName">
+    ///     The table that holds the rows: <c>info0</c> for the base tier (<c>Patch.mpkinfo</c>) and <c>info1</c> for the
+    ///     shader tier (<c>ResourceExA.patchinfo</c>).
+    /// </param>
+    public static NeteaseGamesBaseIndex? Read(Stream stream, string tableName = TableName)
     {
         ArgumentNullException.ThrowIfNull(stream);
+        ArgumentException.ThrowIfNullOrEmpty(tableName);
 
         byte[] header = new byte[100];
         if (stream.ReadAtLeast(header, header.Length, throwOnEndOfStream: false) < header.Length)
@@ -128,7 +140,7 @@ public sealed class NeteaseGamesBaseIndex
         // Page 1 is sqlite_master: walk it to find the root page of the table that holds the shard index,
         // then walk that table. Reading the schema instead of assuming a page number keeps this working for
         // databases where the table was created in another order.
-        uint? tableRoot = FindTableRootPage(stream, page, pageSize, NeteaseGamesBaseIndex.TableName);
+        uint? tableRoot = FindTableRootPage(stream, page, pageSize, tableName);
         if (tableRoot is null)
         {
             return null;

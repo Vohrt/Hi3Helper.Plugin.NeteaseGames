@@ -411,7 +411,62 @@ public partial class NeteaseGamesGameManager : GameManagerBase
     /// </param>
     /// <param name="token">Cancel token.</param>
     /// <returns>The parsed manifest, or <c>null</c> when the directory does not serve one.</returns>
-    public async Task<NeteaseGamesBigPatchList?> FetchBigPatchListAsync(string directoryVersion,
+    public Task<NeteaseGamesBigPatchList?> FetchBigPatchListAsync(string directoryVersion, CancellationToken token)
+        => FetchPoolAsync(directoryVersion, NeteaseGamesBigPatchList.FileName, token);
+
+    /// <summary>
+    ///     Fetches the shader tier pool manifest (<c>bigshadercachelist_dx12.txt</c>) from one <c>big_</c> directory.
+    ///     <para>
+    ///         The file is the shader counterpart of <c>bigpatchlist_windows64_normal.txt</c>: it carries a
+    ///         <c>big_file_list</c> of <c>dx12_N</c> chunks whose bytes are the concatenation of the resources they
+    ///         list. Measured 2026-10-26: the line-0 copy lists 920 chunks / 4,900,910,673 bytes and the
+    ///         <c>@base_version@</c> copy 919.
+    ///     </para>
+    /// </summary>
+    /// <param name="directoryVersion">The directory version (after <c>big_</c>).</param>
+    /// <param name="token">Cancel token.</param>
+    public Task<NeteaseGamesBigPatchList?> FetchShaderPoolAsync(string directoryVersion, CancellationToken token)
+        => FetchPoolAsync(directoryVersion, NeteaseGamesShaderCacheList.FileName, token);
+
+    /// <summary>
+    ///     Fetches the shader cache list (<c>{contentVersion}/shadercachelist_dx12.txt</c>), which carries the per
+    ///     resource hash and size the shader index stores.
+    /// </summary>
+    /// <param name="contentVersion">The content version (line 0 of the patch manifest).</param>
+    /// <param name="token">Cancel token.</param>
+    public async Task<NeteaseGamesShaderCacheList?> FetchShaderCacheListAsync(string contentVersion,
+        CancellationToken token)
+    {
+        if (string.IsNullOrEmpty(contentVersion))
+        {
+            return null;
+        }
+
+        byte[]? raw = await GetContentBytesAsync(
+            $"{contentVersion}/{NeteaseGamesContentEndpoints.ShaderCacheListFileName}", token).ConfigureAwait(false);
+
+        if (raw is null || raw.Length == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            byte[] plain = NeteaseGamesCrypto.IsHexEnvelope(raw)
+                ? NeteaseGamesCrypto.DecryptHexEnvelope(raw)
+                : raw;
+
+            return NeteaseGamesShaderCacheList.Parse(plain);
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidDataException or System.Text.Json.JsonException)
+        {
+            SharedStatic.InstanceLogger?.LogWarning(
+                "[NeteaseGames] The shader cache list of {Version} could not be parsed: {Msg}", contentVersion, ex.Message);
+            return null;
+        }
+    }
+
+    private async Task<NeteaseGamesBigPatchList?> FetchPoolAsync(string directoryVersion, string fileName,
         CancellationToken token)
     {
         if (string.IsNullOrEmpty(directoryVersion))
@@ -420,7 +475,7 @@ public partial class NeteaseGamesGameManager : GameManagerBase
         }
 
         string path = NeteaseGamesContentEndpoints.GetBigPatchContentPath(
-            directoryVersion, section: null, NeteaseGamesBigPatchList.FileName);
+            directoryVersion, section: null, fileName);
 
         byte[]? raw = await GetContentBytesAsync(path, token).ConfigureAwait(false);
         if (raw is null || raw.Length == 0)
