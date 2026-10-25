@@ -64,10 +64,59 @@ public static class NeteaseGamesEnginePatcher
 
     /// <summary>
     ///     Whether an entry of the file list is a marker that asks for a removal instead of a file.
+    ///     <para>
+    ///         ⚠ <b>No live entry is one (measured 2026-10-26).</b> All 10 <c>used_del_dir\mpk_res\…</c> entries are
+    ///         real files that belong in the game root - see <see cref="ResolveTargetPath" />. The predicate is kept
+    ///         because the prefix reads like a removal request, but nothing should act on it before a real removal
+    ///         entry has been observed.
+    ///     </para>
     /// </summary>
     /// <param name="file">The entry.</param>
     public static bool IsDeleteMarker(NeteaseGamesEngineFile file)
         => file.RelativePath.StartsWith(DeleteDirectoryPrefix, StringComparison.Ordinal);
+
+    /// <summary>
+    ///     The directory the <c>used_del_dir</c> entries are written to, relative to the game root.
+    /// </summary>
+    public const string RootResourceDirectoryName = "mpk_res";
+
+    /// <summary>
+    ///     Resolves the path an engine payload entry is written to, relative to the <b>game root</b>.
+    ///     <para>
+    ///         Ordinary entries live below <c>Engine\</c> and drop the <c>.1</c> generation suffix. The
+    ///         <c>used_del_dir\mpk_res\</c> entries are the exception: despite the name they are not removals, they
+    ///         are the root level resource packages. Measured 2026-10-26 - the three smallest were downloaded and
+    ///         their MD5 matched the files in the game root byte for byte:
+    ///     </para>
+    ///     <code>
+    ///         used_del_dir\mpk_res\ResourceExA.mpkinfo.1   ->  ResourceExA.mpkinfo
+    ///         used_del_dir\mpk_res\Resources.mpkinfo.1      ->  Resources.mpkinfo
+    ///         used_del_dir\mpk_res\package_resource.info.1  ->  package_resource.info
+    ///     </code>
+    /// </summary>
+    /// <param name="file">The entry.</param>
+    /// <returns>The path relative to the game root, with forward slashes.</returns>
+    public static string ResolveTargetPath(NeteaseGamesEngineFile file)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+
+        if (file.RelativePath.StartsWith(DeleteDirectoryPrefix, StringComparison.Ordinal))
+        {
+            string rest = file.RelativePath[(DeleteDirectoryPrefix.Length + 1)..];
+            int slash = rest.IndexOf('\\');
+            if (slash >= 0 && string.Equals(rest[..slash], RootResourceDirectoryName, StringComparison.Ordinal))
+            {
+                rest = rest[(slash + 1)..];
+            }
+
+            return StripGenerationSuffix(rest).Replace('\\', '/');
+        }
+
+        return $"{EngineDirectoryName}/{StripGenerationSuffix(file.RelativePath).Replace('\\', '/')}";
+    }
+
+    private static string StripGenerationSuffix(string path)
+        => path.EndsWith(".1", StringComparison.Ordinal) ? path[..^2] : path;
 
     /// <summary>
     ///     Parses the <c>md5_engine.txt</c> file list.

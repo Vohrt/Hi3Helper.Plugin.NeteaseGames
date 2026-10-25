@@ -17,6 +17,20 @@
 > | §5.2 "144 个 / 64 GB 基础包" | 实际 **128 个分卷 / 64.23 GB**（`Patch.mpk` + `Patch1..127`）。 |
 >
 > 其余章节（HEX_ 信封、patchmd5 四行结构、patchlist 分段、mpkinfo 格式、记账文件、启动契约、版本判定）**复核通过**。
+>
+> ## ⚠ 2026-10-26 复核：以下结论再次被推翻（全新安装相关）
+>
+> 复核环境同前（`D:\ywzh\ywzh_extreme`，线上 `20261023182924387` / `6593596`）。
+>
+> | 原结论 | 复核结果 |
+> |---|---|
+> | §5.4 / `AGENTS.md` 待完成 1「`big_` 目录 = `@base_version@`，行 0 只放本轮新增」 | **不完整。** 两个目录是**互补**的，且**行 0 才是权威**：`big_{行0}` 的分块 10,424 个，与 `Patch.mpkinfo` **10,421/10,421 一致（0 个不一致）**；`big_{@base_version@}` 的 10,419 个里有 **20 个大小与索引不符**（都是被本轮重切的）。<br>目录分工实测：**行 0 目录只服务本轮变动的 28 个分块**（9 个新增 + 19 个重切），实测 **28/28 返回的字节数 == 清单声明**；其余分块在行 0 目录 **404**（30 抽样 30/30 在 `@base_version@` 目录 200）。<br>⇒ 取分块要**按分块名分别去两个目录取**，不是整份清单用一个目录。 |
+> | §5.4「`PatchN.mpk` 由多个 `big_common` 条目合并」这个前提未证实 | **已证实，且比想象的简单：分块字节就是分卷字节，无需合并。** 分块 = 其资源按清单顺序的**无缝拼接**（资源之间**没有**分块内的间隙）。实测：`Char_13`（57 个资源，厂商布局里资源之间有 10,223 B 空洞）的分块按顺序切片，**57/57 与厂商分卷逐字节相同**；`Char_730` 行 0 版 **6/6 相同**（`@base_version@` 版只 3/6）；`CGs_13`/`CGs_125` 整块 MD5 == 厂商分卷对应切片 MD5。 |
+> | §5.4「需捕获 `fenbao_mode ≠ 0` 才能重建分卷」 | **不需要了。** 全新安装**不必复现厂商的分卷布局**：插件自己写 `Patch.mpkinfo`，索引描述的是插件产出的布局。厂商 128 个分卷，插件按 524,288,000 B 装填得到 **123 个**，两者资源→分卷的映射完全不同（实测 `w_0` 在厂商是分卷 106，在插件布局里落在别的分卷），但**逐资源字节一致**。 |
+> | §6「`used_del_dir\...` 是删除标记（应跳过）」 | **错。** `md5_engine.txt` 里 10 条 `used_del_dir\mpk_res\*` 是**真实文件**，落地到**游戏根目录**：`ResourceExA.mpk`(62,389,447) / `ResourceExA.mpkinfo`(64) / `ResourceExB.mpk`(51,137,805) / `ResourceExB.mpkinfo`(64) / `Resources.mpk`(1,881,037) / `Resources.mpkinfo`(13,664) / `Resources1.mpk`(28,984,619) / `Resources2.mpk`(110,382,228) / `mpk_filelist.info`(400) / `package_resource.info`(12,684)。<br>实测下载 `ResourceExA.mpkinfo.1` / `ResourceExB.mpkinfo.1` / `Resources.mpkinfo.1`：**200，且 MD5 与磁盘完全一致**。跳过它们会让全新安装缺少根目录资源包。 |
+> | §5.2「根目录 `ResourceExA.mpk` 与 `LocalData\Patch\ResourceExA.mpk` 是同一个包簇」 | **是两个不同的文件。** 根目录的 62,389,447 B（来自 mini pack），`LocalData\Patch\` 的 **524,301,938 B**（由 `big_shader` 分块装配），MD5 不同。前者由引擎载荷提供，后者属于基础/着色器分卷层。 |
+> | §5.4「`essential` 之类的单资源分块就是松散文件」 | **不是。** 池里 **672 个单资源分块**（`Fonts_1`、`CGs_0`、`Char_14` …）都是**分卷内资源**。只有 3 个是真正的松散文件：`prerequisite`、`Misc/lazycode_zstd_dict`、`4a/4a3101465e82fbbdc7e08f834fc82419` —— 它们**不在** `Patch.mpkinfo` 里，且各自的分块字节与磁盘文件 MD5 相同。`essential`（分卷 126，偏移 73,993,554）和 `patch.repository` **在**索引里，必须留在分卷内。 |
+> | §4「`Patch.mpkinfo` 的 `filepath` 是混淆的，未破解」 | **已破解**：`plain[i] = stored[i] ^ (i < len%17 ? 0x2B : 0x35)`，逐列独立。用它可做「池路径 vs 索引」对账：行 0 池 232,453 条 = 索引 232,450 条 + 3 个松散文件，**缺口 0**。 |
 
 逆向对象：`D:\ywzh\ywzh_launcher\Win64Release\PCLauncher\PCLauncher.exe`
 （PyInstaller 式单体，PE32+，149 MB，导出 `do_unzip_dir` / `do_unzip_dir_inner`；
@@ -488,7 +502,13 @@ patch_core.py:patch_logic:9873 <- patch_core.py:process:10648 <- patch_core.py:<
 - 文件列表：`https://h74.gdl.netease.com/loose_file/mini_pack_<ver>/md5_engine.txt`（带签名）→ 实测 200，21,811 B，**287 条**。
 - 每条：`<相对路径> <64位哈希> <大小>`，路径带 `.1` 后缀表示最新一代。
 - 实测 287 条中 277 条与磁盘 `Engine\` 下同名文件**大小完全一致**；
-  其余 10 条是 `used_del_dir\...` 删除标记（应跳过）。
+  其余 10 条是 `used_del_dir\mpk_res\...`。
+- ⚠ **2026-10-26 复核：那 10 条不是删除标记，是真实文件，落地到「游戏根目录」（不是 `Engine\`）。**
+  实测下载 `ResourceExA.mpkinfo.1` / `ResourceExB.mpkinfo.1` / `Resources.mpkinfo.1` 均 **200**，
+  且 MD5 与磁盘上的 `D:\ywzh\ywzh_extreme\ResourceExA.mpkinfo` 等**完全一致**。
+  它们提供根目录的 8 个 `Resources*.mpk` / `ResourceEx*.mpk` 与 `mpk_filelist.info` / `package_resource.info`。
+  映射规则：`used_del_dir\mpk_res\<name>.1` → `<游戏根>\<name>`（去掉 `used_del_dir\mpk_res\` 前缀与 `.1` 后缀）。
+  ⇒ 跳过这 10 条会让全新安装缺少根目录资源包，游戏起不来。
 - 注意内容主机 `h74.gph.netease.com` 对该路径 404，**必须用 `h74.gdl.netease.com`**。
 
 ---

@@ -170,6 +170,17 @@ public sealed class NeteaseGamesDownloadPlan
     /// </summary>
     public bool IsFreshInstallUnsupported { get; set; }
 
+    /// <summary>
+    ///     The base tier work of a fresh installation, or <c>null</c> when the plan has none.
+    ///     <para>
+    ///         The base tier cannot be expressed as a list of whole files to download: the vendor serves it only as
+    ///         a pool of chunks, and the shard files are what the plugin writes to disk by concatenating those
+    ///         chunks. Keeping the steps here keeps the reported size, the download progress and the assembly in
+    ///         one place (see <see cref="NeteaseGamesBaseAssembler" />).
+    ///     </para>
+    /// </summary>
+    public NeteaseGamesBaseAssemblyPlan? BaseAssembly { get; set; }
+
     /// <summary>The staging directory every object is downloaded into.</summary>
     public string StagingDirectory { get; init; } = string.Empty;
 
@@ -185,7 +196,7 @@ public sealed class NeteaseGamesDownloadPlan
     public int LooseCount => CountOf(NeteaseGamesDownloadKind.LooseFile);
 
     /// <summary>Whether the plan is empty (nothing to do).</summary>
-    public bool IsEmpty => Items.Count == 0;
+    public bool IsEmpty => Items.Count == 0 && (BaseAssembly is null || BaseAssembly.Steps.Count == 0);
 
     /// <summary>The number of bytes that are already on disk.</summary>
     public long DownloadedSize => Interlocked.Read(ref _downloaded);
@@ -195,7 +206,7 @@ public sealed class NeteaseGamesDownloadPlan
     {
         get
         {
-            long total = 0;
+            long total = BaseAssembly?.TotalSize ?? 0;
             foreach (NeteaseGamesDownloadItem item in Items)
             {
                 total += item.ExpectedSize;

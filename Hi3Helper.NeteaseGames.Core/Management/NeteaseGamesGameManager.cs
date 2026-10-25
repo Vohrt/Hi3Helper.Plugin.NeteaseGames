@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Runtime.InteropServices.Marshalling;
 using System.Threading;
@@ -399,6 +401,77 @@ public partial class NeteaseGamesGameManager : GameManagerBase
             looseFileParentDir,
             NeteaseGamesContentEndpoints.GetEnginePayloadHosts(),
             token);
+
+    /// <summary>
+    ///     Fetches the base tier manifest (<c>bigpatchlist_windows64_normal.txt</c>) from one <c>big_</c> directory.
+    /// </summary>
+    /// <param name="directoryVersion">
+    ///     The directory version (the part after <c>big_</c>). A fresh installation has to try <b>both</b> the base
+    ///     version and the content version, because neither serves the whole pool on its own.
+    /// </param>
+    /// <param name="token">Cancel token.</param>
+    /// <returns>The parsed manifest, or <c>null</c> when the directory does not serve one.</returns>
+    public async Task<NeteaseGamesBigPatchList?> FetchBigPatchListAsync(string directoryVersion,
+        CancellationToken token)
+    {
+        if (string.IsNullOrEmpty(directoryVersion))
+        {
+            return null;
+        }
+
+        string path = NeteaseGamesContentEndpoints.GetBigPatchContentPath(
+            directoryVersion, section: null, NeteaseGamesBigPatchList.FileName);
+
+        byte[]? raw = await GetContentBytesAsync(path, token).ConfigureAwait(false);
+        if (raw is null || raw.Length == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return NeteaseGamesBigPatchList.Parse(raw);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    ///     Downloads one content object, trying every content host in turn.
+    /// </summary>
+    /// <param name="relativePath">The path relative to the content root.</param>
+    /// <param name="token">Cancel token.</param>
+    /// <returns>The bytes, or <c>null</c> when no host served the object.</returns>
+    private async Task<byte[]?> GetContentBytesAsync(string relativePath, CancellationToken token)
+    {
+        List<string> roots =
+        [
+            NeteaseGamesEndpoints.ContentHostUrl,
+            .. NeteaseGamesContentEndpoints.ContentMirrorHosts.Select(static h => "https://" + h + "/")
+        ];
+
+        foreach (string root in roots)
+        {
+            string url = root.TrimEnd('/') + "/" + relativePath.TrimStart('/');
+            try
+            {
+                using System.Net.Http.HttpResponseMessage response =
+                    await _httpClient.GetAsync(url, token).ConfigureAwait(false);
+                if (response.IsSuccessStatusCode)
+                {
+                    return await response.Content.ReadAsByteArrayAsync(token).ConfigureAwait(false);
+                }
+            }
+            catch (HttpRequestException)
+            {
+                // Try the next host.
+            }
+        }
+
+        return null;
+    }
 
     private async Task<long> FetchRemotePatchVersionAsync(CancellationToken token)
     {

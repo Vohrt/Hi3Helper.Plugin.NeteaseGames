@@ -47,10 +47,48 @@ Collapse Launcher 的网易游戏插件：**一个 Core + 每游戏一个薄 pre
 |---|---|---|
 | `Update` | 宿主更新按钮 | 远端清单中与磁盘大小不符的包 |
 | `Repair` | 已装游戏点安装/修复 | 同上（`Repair` 与 `Update` 判定相同） |
-| `Install` | 目录里没游戏 | **不支持**，抛 `NotSupportedException` |
+| `Install` | 目录里没游戏 | 基础层（`Patch.mpk`+`Patch1..127`）由 `big_` 分块装配 + 着色器层 + 增量层（见下） |
 
 - `plan.IsRemoteListUnavailable` ⇒ 抛异常（空计划意味着"未知"而非"完成"）。
-- `plan.IsFreshInstallUnsupported` ⇒ 抛 `NotSupportedException`。
+- `plan.IsFreshInstallUnsupported` ⇒ 抛 `NotSupportedException`（仅在 `big_` 清单两份都取不到时设置）。
+
+### 全新安装（Install）—— 2026-10-26 实测定稿
+
+**分块字节 = 分卷字节，无需合并。** 分块是其资源按清单顺序的**无缝拼接**（分块内部资源之间没有间隙）。
+实测：`Char_13`（57 资源，厂商布局里有 10,223 B 空洞）按顺序切片 **57/57 逐字节等于厂商分卷**；
+`Char_730` 行 0 版 6/6 正确、`@base_version@` 版只 3/6；`CGs_13`/`CGs_125` 整块 MD5 == 厂商切片 MD5。
+
+**目录分工（不是"整份清单用一个目录"）：**
+
+| 分块 | 取哪个目录 |
+|---|---|
+| 本轮变动的 28 个（9 个新增 + 19 个重切） | `big_{行0}` —— 实测 28/28 返回字节数 == 清单声明 |
+| 其余全部 | `big_{@base_version@}` —— 实测 30/30 命中；行 0 目录对其 **404** |
+
+判定「本轮变动」= 该分块在行 0 清单里的 `(size, paths)` 与 `@base_version@` 清单不同（或只存在于行 0）。
+**不能用「哪份清单列了它」来选目录**：`@base_version@` 清单也列了那 19 个重切分块，且目录里放的是**旧的**字节。
+
+**规划器按行 0 清单为准。** 行 0 的 10,424 个分块与 `Patch.mpkinfo` **10,421/10,421 一致**；
+`@base_version@` 的 10,419 个里有 **20 个大小不符**（旧一代）。`@base_version@` 只用于补 4 个行 0 没列的分块名
+（其中 3 个大小不符会被跳过，1 个 `essential_0` 与 `essential_1` 重名 —— 行 0 版胜出）。
+
+**分卷数不必与厂商相同。** 插件按 524,288,000 B 装填得到 **123** 个分卷（厂商 128），
+资源→分卷映射完全不同（实测 `w_0` 在厂商是分卷 106，插件布局里落到别处），
+但**逐资源字节一致**（跨分卷抽样 60/60 相同）。索引由插件自己写（`NeteaseGamesBaseIndexWriter`），
+描述的就是插件产出的布局。
+
+**松散文件只有 3 个**（`NeteaseGamesBaseLooseFiles`）：`prerequisite`、`Misc/lazycode_zstd_dict`、
+`4a/4a3101465e82fbbdc7e08f834fc82419`。它们不在 `Patch.mpkinfo` 里，各自的分块字节 == 磁盘文件 MD5。
+⚠ **不要**把「单资源分块」都当松散文件 —— 池里有 **672 个**单资源分块（`Fonts_1`/`CGs_0`/`Char_14`…）是分卷内资源；
+`essential`（分卷 126，偏移 73,993,554）与 `patch.repository` 也在索引里，必须留在分卷内。
+
+**同路径冲突**：`resource.repository_0`（旧）与 `resource.repository_1`（新）都列 `resource.repository`。
+规划器保留先放置者，`BuildSteps` 只给**真正放置了资源的那个分块**发 step（`Placement.ChunkName` 判定）；
+否则落败分块的字节会覆盖胜者的。`AGENTS.md` 旧文提到的「9 个包差」就是这个。
+
+**根目录资源包来自引擎载荷**：`md5_engine.txt` 里 10 条 `used_del_dir\mpk_res\*` **不是删除标记**，
+是真实文件 → 游戏根目录（`NeteaseGamesEnginePatcher.ResolveTargetPath`）。
+实测下载 `ResourceExA.mpkinfo.1`/`ResourceExB.mpkinfo.1`/`Resources.mpkinfo.1` 均 200 且 MD5 与磁盘一致。
 - 包判定有两道闸：① 磁盘大小 == 远端清单 `entry[-1]`；② `*.mpkinfo` 索引布局校验
   **磁盘大小 ≥ 载荷长度**（不是相等！`Patch1009.mpk` 有 61,766 B 尾部填充）。
   两者都过才算完好。见 PROTOCOL-VERIFIED §4。
@@ -99,10 +137,11 @@ tools\Indexer.exe Hi3Helper.Plugin.SoR\publish\Release
    清单在 `/{big_<version>}/bigpatchlist_windows64_normal.txt`，分块在
    `/{big_<version>}/{big_common|big_shader}/{条目}`。
 
-   ⚠ **`<version>` 取 `@metadata@.@base_version@`，不是 `patchmd5` 行 0**（2026-10-24 实测）：
-   行 0 目录**只放本轮新增**的分块（60 抽 1 命中；`only_new` 条目 8/8 命中），
-   `@base_version@` 目录是**持续累积**的池（对两份 `bigpatchlist` 分别抽样 60/60、15/15、15/15 全 200）。
-   旧结论"`big_` + 行0"**是错的**，照它实现会 90%+ 打 404。
+   ⚠ **`<version>` 要按分块分别选目录**（2026-10-26 实测定稿，见「plan 模式」一节的表）：
+   行 0 目录只服务**本轮变动的 28 个分块**（28/28 命中），其余分块在那里 **404**；
+   `@base_version@` 目录服务其余全部分块（30/30 命中），但其中 19 个重切分块放的是**旧的**字节。
+   ⇒ 只用一个目录会失败（行 0 → 90%+ 404；base → 19 个分块字节过期）。
+   规划以**行 0 清单**为准（与 `Patch.mpkinfo` 10,421/10,421 一致）；`@base_version@` 只补 4 个行 0 未列的分块名。
 
    清单实测 11,122,614 B（base_version 版）/ 11,124,133 B（行0 版）；`big_common` 10,406 块 /
    **59.37 GB**。辅助函数：`NeteaseGamesContentEndpoints.GetBigPatchUrl` / `GetBigPatchContentPath`
@@ -120,16 +159,18 @@ tools\Indexer.exe Hi3Helper.Plugin.SoR\publish\Release
    实现 `NeteaseGamesBaseIndex`（零依赖 B-tree 遍历，**不要**引入 SQLitePCLRaw，它有高危漏洞公告）
    + `NeteaseGamesGameInstaller.FindTruncatedBaseShards`。
    被误判的 "填充陷阱" 直接后果：截断检测完全失效（把 `Patch54` 截到 300 MB 仍报 0 个）。
-3. **仍缺 `PatchN.mpk` 的合并规则**（从远端重建分卷所需）：旧笔记说单个分卷由多个 `big_common`
-   条目合并（`fenbao_name` / `PendingBatch` / `merge_fenbao_tmp`），顺序依赖 `fenbao_migration_map`；
-   已逐一证伪 6 种排序假设。
+3. ~~**仍缺 `PatchN.mpk` 的合并规则**~~ —— **2026-10-26 已解决：不存在"合并"，分块字节就是分卷字节。**
+   分块 = 其资源按清单顺序的无缝拼接；按分卷内偏移切片即得资源字节（实测 57/57、6/6、整块 MD5 全等）。
+   插件只需决定**每个分块放在哪个分卷的哪个偏移**，然后顺序追加；分卷数/排布不必与厂商一致。
 
-   ⚠ **2026-10-24 复核：这个前提本身还没有任何观测支持。** 对 6 个真实 `big_common` 分块做
-   条目级（解压后 md5）与"块大小序列"两种比对，**0 命中**。已确认的事实只有：
+   历史（保留供追溯）：旧笔记说单个分卷由多个 `big_common` 条目合并（`fenbao_name` / `PendingBatch` /
+   `merge_fenbao_tmp`），顺序依赖 `fenbao_migration_map`；已逐一证伪 6 种排序假设。
+
+   ~~⚠ 2026-10-24 复核：这个前提本身还没有任何观测支持。~~（2026-10-26 推翻：见本条开头）
    - `big_common` 分块与 `PatchN.mpk` **都是**「`ZSTD`+u32 解压长度+frame」的重复容器；
    - `Patch126.mpk` 的 381 条索引与文件**严格连续**（381/381 首尾相接，末条结束 = 文件大小）。
 
-   当前 `fenbao_mode = 0`，无法复现真实改写。要继续必须在 `fenbao_mode ≠ 0` 时抓一次全量改写。
+   ~~当前 `fenbao_mode = 0`，无法复现真实改写。~~ 不需要复现了：全新安装按插件自己的布局写索引即可。
 
    ✅ **已修（2026-10-24）**：`@bigpatchopen@` 是**分支能力位**（自 10-22 起一直为 true），不是"本轮要改基础层"
    的意思。`VerifyBaseTierCompletable` 现在改为比对 **`@bigpatchmd5@` 指纹**：本地记录（`patchmd5` 里）与远端
@@ -138,6 +179,11 @@ tools\Indexer.exe Hi3Helper.Plugin.SoR\publish\Release
    `*.mpkinfo` 索引可用于"是否截断"校验（见 PROTOCOL-VERIFIED §4）。
    ⚠ 引擎载荷**只在 `h74.gdl.netease.com`**（且**必须**带 key1/key2 签名，裸请求 403）；
    `h74.gph.*` 全 404。下载器默认用 gph，所以引擎项必须显式指定主机 + 签名。
+
+   ⚠ **`used_del_dir\mpk_res\*` 不是删除标记**（2026-10-26 实测）：10 条都是真实文件，落地到**游戏根目录**
+   （`Resources*.mpk` / `ResourceEx*.mpk` / `mpk_filelist.info` / `package_resource.info`）。
+   下载三个最小的验证：200 且 MD5 与磁盘完全一致。跳过它们 → 全新安装缺根目录资源包。
+   映射见 `NeteaseGamesEnginePatcher.ResolveTargetPath`。
 5. **`sort_map` / `preload_list` 是临时文件**，真实安装里不存在 ⇒ 插件不应持久化（见 §9.3）。
 6. **`InstanceLogger` 在宿主中可能不挂载**（`SharedLogger.Log` 在 `InstanceLoggerCallback == null` 时静默返回），
    排查运行时行为要看宿主 Console 窗口或日志里的 `[Scheme]`/`[PluginInfo]` 行，不要指望 `[NeteaseGames]` 前缀。

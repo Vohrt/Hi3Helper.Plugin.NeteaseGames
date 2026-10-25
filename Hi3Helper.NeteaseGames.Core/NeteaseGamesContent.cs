@@ -45,6 +45,17 @@ public static class NeteaseGamesContentEndpoints
     /// </summary>
     public static IReadOnlyList<string> GetEnginePayloadHosts() => [EnginePayloadHost];
 
+    /// <summary>
+    ///     The hosts that may serve the base tier (<c>big_</c>) chunk pool.
+    ///     <para>
+    ///         These are the ordinary content hosts, and they do <b>not</b> require the URL signature: measured
+    ///         2026-10-26, a bare request for <c>big_20261021113421287/big_common/Char_736</c> answers 200, and a
+    ///         forged <c>key1</c>/<c>key2</c> is accepted as well. Only the engine payload host
+    ///         (<c>h74.gdl.netease.com</c>) rejects an unsigned request.
+    ///     </para>
+    /// </summary>
+    public static IReadOnlyList<string> GetBigPatchHosts() => [ContentHost, .. ContentMirrorHosts];
+
     /// <summary>The name of the full file list.</summary>
     public const string PatchListFileName = "patchlist_windows64_normal.txt";
 
