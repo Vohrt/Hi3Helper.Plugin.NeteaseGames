@@ -269,6 +269,16 @@ public static class NeteaseGamesBaseAssembler
                 SharedStatic.InstanceLogger?.LogInformation(
                     "[NeteaseGames] Base shard {Shard} resumes after {Chunks} chunks ({Bytes} bytes already on disk)",
                     shardIndex, firstMissing, resumeOffset);
+
+                // The chunks that are already there are not downloaded again, so they have to be accounted for here.
+                // Without this a resumed run reported only the remaining bytes and the bar never reached 100 %.
+                long resumedBytes = 0;
+                for (int i = 0; i < firstMissing; i++)
+                {
+                    resumedBytes += steps[i].Chunk.Size;
+                }
+
+                progress?.Invoke(resumedBytes);
             }
         }
         else

@@ -258,8 +258,18 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         long totalBytes = plan.TotalSize;
         int totalFiles = plan.Items.Count;
 
+        // One cumulative counter for the whole run. The host computes the percentage and the speed from
+        // DownloadedBytes alone, so every phase has to feed the same monotonically increasing total: the assemblers
+        // report one chunk at a time (that size, not a running total), while the downloader reports the running total
+        // of its own phase. Handing either of those straight to the host made the bar oscillate between 5 MB and
+        // 9 MB out of 66 GB and jump backwards (measured 2026-10-26).
+        NeteaseGamesProgressTracker progress = new(progressDelegate, totalBytes, totalFiles);
+
+        // Bytes that a previous, interrupted run already left on disk count from the start.
+        progress.AddExisting(plan.DownloadedSize);
+
         // Report the initial state right away so the host does not show a frozen "0 / N" badge.
-        ReportProgress(progressDelegate, plan.DownloadedSize, totalBytes, 0, totalFiles);
+        progress.Report();
 
         NeteaseGamesDownloader downloader = new(_httpClient);
 
@@ -280,7 +290,7 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
                 patchDirectory,
                 baseStaging,
                 downloader,
-                bytes => ReportProgress(progressDelegate, bytes, totalBytes, 0, totalFiles),
+                progress.AddDelta,
                 token).ConfigureAwait(false);
 
             if (failedChunk is not null)
@@ -312,7 +322,7 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
                 patchDirectory,
                 shaderStaging,
                 downloader,
-                bytes => ReportProgress(progressDelegate, bytes, totalBytes, 0, totalFiles),
+                progress.AddDelta,
                 token,
                 NeteaseGamesBaseLayoutPlanner.GetShaderShardFileName).ConfigureAwait(false);
 
@@ -331,7 +341,7 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
             gamePath,
             plan,
             downloader,
-            bytes => ReportProgress(progressDelegate, bytes, totalBytes, 0, totalFiles),
+            progress.SetAbsolute,
             token).ConfigureAwait(false);
 
         if (!result.IsSuccess)
@@ -359,7 +369,9 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         manager.EnsureLocalVersionProbed();
         InvalidatePlan();
 
-        ReportProgress(progressDelegate, totalBytes, totalBytes, totalFiles, totalFiles);
+        // Finish at exactly 100 %: the phases can fall a few bytes short (a side file whose size is unknown is
+        // counted as 0), and a bar that stops at 99.99 % looks like a stuck run.
+        progress.Complete();
         progressStateDelegate?.Invoke(InstallProgressState.Completed);
     }
 
@@ -1726,31 +1738,6 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
     /// </summary>
     private static string ContentPath(string version, string? section, string name)
         => string.IsNullOrEmpty(section) ? $"{version}/{name}" : $"{version}/{section}/{name}";
-
-    private static void ReportProgress(
-        InstallProgressDelegate? progressDelegate,
-        long downloadedBytes,
-        long totalBytes,
-        int downloadedCount,
-        int totalCount)
-    {
-        if (progressDelegate is null)
-        {
-            return;
-        }
-
-        InstallProgress progress = new()
-        {
-            DownloadedBytes = downloadedBytes,
-            TotalBytesToDownload = totalBytes,
-            DownloadedCount = downloadedCount,
-            TotalCountToDownload = totalCount,
-            StateCount = downloadedCount,
-            TotalStateToComplete = totalCount
-        };
-
-        progressDelegate(in progress);
-    }
 
     /// <inheritdoc/>
     public override void Dispose()
