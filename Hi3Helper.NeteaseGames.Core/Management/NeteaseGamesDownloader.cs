@@ -424,6 +424,17 @@ public sealed class NeteaseGamesDownloader
         {
             alreadyDownloaded = new FileInfo(item.StagedPath).Length;
 
+            // An object whose size the manifest does not announce cannot be resumed: there is no way to tell a
+            // partial file from a complete one, and the staged file may be the previous round's copy. Keeping it
+            // made the request carry "Range: bytes=<file length>-" against a file of exactly that length, which the
+            // edge answers with 416 - and a fresh installation then failed on the last object of the plan
+            // (measured 2026-10-26, shadercachelist_dx12.txt, 7,985,520 bytes staged).
+            if (item.ExpectedSize <= 0)
+            {
+                DeleteStaged(item);
+                alreadyDownloaded = 0;
+            }
+
             // A file that is already complete must not be requested again: the resume would ask for a range
             // that starts behind the end of the file, and the edge answers with "416 Not Satisfiable".
             if (item.ExpectedSize > 0 && alreadyDownloaded == item.ExpectedSize)
@@ -572,6 +583,17 @@ public sealed class NeteaseGamesDownloader
         {
             SharedStatic.InstanceLogger?.LogWarning(
                 "[NeteaseGames] Content host refused {Uri} with {Status}", uri, (int)response.StatusCode);
+
+            // 416 means the range we asked for is past the end of the object. Whatever is on disk is not a usable
+            // prefix, so it is dropped and the next attempt (or the next host) starts from zero instead of asking
+            // for the same impossible range again - which is how a single unknown-size object failed every host
+            // and cancelled the whole run (measured 2026-10-26).
+            if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable && alreadyDownloaded > 0)
+            {
+                DeleteStaged(item);
+                return (false, true);
+            }
+
             return (false, false);
         }
 

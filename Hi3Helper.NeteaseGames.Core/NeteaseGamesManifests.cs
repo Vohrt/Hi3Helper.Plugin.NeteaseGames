@@ -414,6 +414,17 @@ public sealed record NeteaseGamesPatchManifest
     /// </summary>
     public string BigPatchMd5 { get; init; } = string.Empty;
 
+    /// <summary>
+    ///     <c>@metadata@.@shadercachelistmd5@["shadercachelist_dx12.txt"]</c> - the hash of the shader cache list
+    ///     this round expects.
+    ///     <para>
+    ///         The local <c>patchmd5</c> record carries the same field for the round that was installed, so comparing
+    ///         the two tells whether <c>shadercachelist_dx12.txt</c> has to be re-downloaded. Measured 2026-10-26:
+    ///         both values were <c>4429205421084825608</c>, i.e. the file on disk was already current.
+    ///     </para>
+    /// </summary>
+    public string ShaderCacheListMd5 { get; init; } = string.Empty;
+
     /// <summary>The version of the patch list (the hash of the remote file list, line 1).</summary>
     public ulong PatchListHash { get; init; }
 
@@ -470,6 +481,7 @@ public sealed record NeteaseGamesPatchManifest
             bool isBigPatchOpen = false;
             bool isFullPackage = false;
             string bigPatchMd5Token = string.Empty;
+            string shaderCacheListMd5 = string.Empty;
             if (root.TryGetProperty("@metadata@", out JsonElement metadata))
             {
                 if (metadata.TryGetProperty("@base_version@", out JsonElement baseElement))
@@ -515,6 +527,22 @@ public sealed record NeteaseGamesPatchManifest
                     };
                 }
 
+                // @metadata@.@shadercachelistmd5@ holds one hash per shader cache list file. Only the dx12 entry is
+                // used: the game runs with --dx12 (the plugin's own launch contract) and the dx9/dx11 entries are
+                // empty or irrelevant on this branch. Measured 2026-10-26: the value is identical on disk and in
+                // the remote manifest, so it is a reliable "is the local copy already current" test.
+                if (metadata.TryGetProperty("@shadercachelistmd5@", out JsonElement shaderHashes) &&
+                    shaderHashes.ValueKind == JsonValueKind.Object &&
+                    shaderHashes.TryGetProperty("shadercachelist_dx12.txt", out JsonElement shaderHash))
+                {
+                    shaderCacheListMd5 = shaderHash.ValueKind switch
+                    {
+                        JsonValueKind.Number => shaderHash.GetRawText(),
+                        JsonValueKind.String => shaderHash.GetString() ?? string.Empty,
+                        _                    => string.Empty
+                    };
+                }
+
                 // Line 3 is authoritative; the metadata copy is only used when the line is missing.
                 if (result.PatchVersion <= 0 &&
                     metadata.TryGetProperty("@private_res_version@", out JsonElement privateVersion))
@@ -537,7 +565,8 @@ public sealed record NeteaseGamesPatchManifest
                 EngineVersion = engineVersion,
                 IsBigPatchOpen = isBigPatchOpen,
                 IsFullPackage = isFullPackage,
-                BigPatchMd5 = bigPatchMd5Token
+                BigPatchMd5 = bigPatchMd5Token,
+                ShaderCacheListMd5 = shaderCacheListMd5
             };
         }
         catch (JsonException)

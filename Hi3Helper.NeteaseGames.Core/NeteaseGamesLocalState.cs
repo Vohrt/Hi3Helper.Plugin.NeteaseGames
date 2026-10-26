@@ -188,6 +188,17 @@ public sealed class NeteaseGamesLocalState
     public string BigPatchMd5 { get; init; } = string.Empty;
 
     /// <summary>
+    ///     <c>@metadata@.@shadercachelistmd5@["shadercachelist_dx12.txt"]</c> of the installed round - the hash of
+    ///     the shader cache list that was written to disk.
+    ///     <para>
+    ///         The remote manifest announces the same field for the round being offered; comparing the two is the
+    ///         authoritative "does shadercachelist_dx12.txt need a refresh" test. Using the content version instead
+    ///         planned a 7,985,520 byte re-download on every round even when the file had not changed.
+    ///     </para>
+    /// </summary>
+    public string ShaderCacheListMd5 { get; init; } = string.Empty;
+
+    /// <summary>
     ///     Reads the local state from a game installation directory.
     ///     <para>
     ///         <b>Version sources, in the order the official launcher uses them.</b>
@@ -229,6 +240,7 @@ public sealed class NeteaseGamesLocalState
         string shaderVersion = string.Empty;
         string contentVersion = string.Empty;
         string bigPatchMd5 = string.Empty;
+        string shaderCacheListMd5 = string.Empty;
 
         // The launcher's own record: a verbatim copy of the remote patchmd5, whose fourth line is the installed
         // @private_res_version@ and whose @metadata@ block repeats it.
@@ -259,6 +271,9 @@ public sealed class NeteaseGamesLocalState
                 // The same record carries the fingerprint of the base tier that round installed. It is the only
                 // way to tell "big patch round with an unchanged base tier" from "the base tier really moved".
                 bigPatchMd5 = ReadPatchMd5BaseFingerprint(text);
+
+                // Same record, same metadata block: the hash of the shader cache list this round installed.
+                shaderCacheListMd5 = ReadPatchMd5ShaderCacheListHash(text);
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException or FormatException)
             {
@@ -330,7 +345,8 @@ public sealed class NeteaseGamesLocalState
             GameVersionToken = gameVersionToken,
             ShaderVersion = shaderVersion,
             ContentVersion = contentVersion,
-            BigPatchMd5 = bigPatchMd5
+            BigPatchMd5 = bigPatchMd5,
+            ShaderCacheListMd5 = shaderCacheListMd5
         };
     }
 
@@ -407,6 +423,52 @@ public sealed class NeteaseGamesLocalState
 
         int end = start;
         while (end < text.Length && (char.IsAsciiDigit(text[end]) || text[end] == '-'))
+        {
+            end++;
+        }
+
+        return end > start ? text[start..end] : string.Empty;
+    }
+
+    /// <summary>
+    ///     Reads <c>@metadata@.@shadercachelistmd5@["shadercachelist_dx12.txt"]</c> from a decrypted
+    ///     <c>patchmd5</c> record.
+    /// </summary>
+    /// <param name="text">The decrypted text of a patchmd5 file.</param>
+    /// <returns>The hash as stored (a decimal token), or an empty string when absent.</returns>
+    public static string ReadPatchMd5ShaderCacheListHash(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        int index = text.IndexOf("\"@shadercachelistmd5@\"", StringComparison.Ordinal);
+        if (index < 0)
+        {
+            return string.Empty;
+        }
+
+        int key = text.IndexOf("\"shadercachelist_dx12.txt\"", index, StringComparison.Ordinal);
+        if (key < 0)
+        {
+            return string.Empty;
+        }
+
+        int colon = text.IndexOf(':', key);
+        if (colon < 0)
+        {
+            return string.Empty;
+        }
+
+        int start = colon + 1;
+        while (start < text.Length && (char.IsWhiteSpace(text[start]) || text[start] == '"'))
+        {
+            start++;
+        }
+
+        int end = start;
+        while (end < text.Length && char.IsAsciiDigit(text[end]))
         {
             end++;
         }

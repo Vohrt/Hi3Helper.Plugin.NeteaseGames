@@ -578,7 +578,7 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         if (manifest is not null && !string.IsNullOrEmpty(manifest.ContentVersion))
         {
             AppendShaderCacheList(plan, gamePath, manifest.ContentVersion,
-                NeteaseGamesLocalState.Read(gamePath));
+                NeteaseGamesLocalState.Read(gamePath), manifest.ShaderCacheListMd5);
 
             // A fresh installation has no local patch list at all, and every later update compares against it. The
             // content host serves the same document the launcher keeps locally (measured 2026-10-26: the file at the
@@ -1559,16 +1559,23 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
     }
 
     private static void AppendShaderCacheList(NeteaseGamesDownloadPlan plan, string gamePath, string contentVersion,
-        NeteaseGamesLocalState localState)
+        NeteaseGamesLocalState localState, string remoteShaderCacheListMd5)
     {
         string localPath = Path.Combine(gamePath, NeteaseGamesPaths.PatchDirectoryRelativePath,
             NeteaseGamesContentEndpoints.ShaderCacheListFileName);
 
         bool missing = !File.Exists(localPath);
-        bool versionMoved = !string.IsNullOrEmpty(localState.ContentVersion) &&
-                            !string.Equals(localState.ContentVersion, contentVersion, StringComparison.Ordinal);
 
-        if (!missing && !versionMoved)
+        // The manifest announces the hash of the shader cache list it expects (@shadercachelistmd5@), and the local
+        // record carries the hash of the one installed. Comparing those is the authoritative test; the content
+        // version alone is a poor proxy - it moves on every round even when this file did not change, which made
+        // every installation re-download 7,985,520 bytes for nothing.
+        bool hashDiffers = !string.IsNullOrEmpty(localState.ShaderCacheListMd5) &&
+                           !string.IsNullOrEmpty(remoteShaderCacheListMd5) &&
+                           !string.Equals(localState.ShaderCacheListMd5, remoteShaderCacheListMd5,
+                               StringComparison.Ordinal);
+
+        if (!missing && !hashDiffers)
         {
             return;
         }
