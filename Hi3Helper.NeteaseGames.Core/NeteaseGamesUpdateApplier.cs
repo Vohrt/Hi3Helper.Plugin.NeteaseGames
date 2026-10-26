@@ -123,6 +123,26 @@ public static class NeteaseGamesUpdateApplier
             }
         }
 
+        // The base tier's standalone files go into the patch directory, next to the shards.
+        foreach (NeteaseGamesDownloadItem item in plan.Items)
+        {
+            if (item.Kind != NeteaseGamesDownloadKind.BaseFile)
+            {
+                continue;
+            }
+
+            try
+            {
+                MoveIntoPlace(item, patchDirectory);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                SharedStatic.InstanceLogger?.LogError(
+                    "[NeteaseGames] Could not write the base file '{Path}': {Msg}", item.RelativePath, ex.Message);
+                return NeteaseGamesApplyResult.ApplyFailed(item.RelativePath);
+            }
+        }
+
         foreach (NeteaseGamesDownloadItem item in plan.Items)
         {
             if (item.Kind != NeteaseGamesDownloadKind.LooseFile)

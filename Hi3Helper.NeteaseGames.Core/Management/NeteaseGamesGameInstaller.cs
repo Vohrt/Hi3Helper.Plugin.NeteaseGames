@@ -521,6 +521,25 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
                     RequiresSignature = true
                 });
             }
+
+            // The engine file list itself belongs in the installation. The plugin used to download it only to read
+            // it and never kept a copy, so a fresh installation had no Engine\md5_engine.txt - the file the official
+            // installation carries (21,811 bytes, measured 2026-10-26) and the game verifies its engine against.
+            string engineListPath = Path.Combine(gamePath, NeteaseGamesPaths.EngineMd5RelativePath);
+            if (!File.Exists(engineListPath))
+            {
+                plan.Items.Add(new NeteaseGamesDownloadItem
+                {
+                    RelativePath = $"{miniPack.LooseFileParentDir.TrimEnd('/')}/{NeteaseGamesEnginePatcher.EngineFileListName}",
+                    TargetRelativePath = NeteaseGamesPaths.EngineMd5RelativePath,
+                    Kind = NeteaseGamesDownloadKind.LooseFile,
+                    // The list does not announce its own size. Leaving it 0 makes the downloader fetch it from zero
+                    // instead of trying to resume a file of unknown completeness.
+                    ExpectedSize = 0,
+                    Hosts = engineHosts,
+                    RequiresSignature = true
+                });
+            }
         }
 
         // 2. The patch packages and the indexes that describe them.
@@ -536,6 +555,12 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
             NeteaseGamesPatchList remote = await manager
                 .FetchRemotePatchListAsync(manifest.ContentVersion, token)
                 .ConfigureAwait(false);
+
+            // The per-resource content hashes live in this list's `common` / `windows64_common` sections, and they
+            // are the only source for the `hash` column of the base index (measured 2026-10-26: 232,449 of the
+            // vendor's 232,450 rows match it exactly). Keeping the list on the plan lets the index writer fill that
+            // column with real values instead of zeros.
+            plan.RemotePatchList = remote;
 
             if (remote.Packages.Count == 0)
             {
@@ -1390,20 +1415,28 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
     private static void WriteBaseIndex(string patchDirectory, NeteaseGamesBaseAssemblyPlan assembly,
         NeteaseGamesShaderCacheList? shaderCacheList, NeteaseGamesDownloadPlan plan)
     {
-        // The hash field is the vendor's 64 bit content hash, and for the base tier it is NOT known: the chunk hash
-        // in bigpatchlist is a hash of the chunk, not of each resource, and the patch list only covers resources the
-        // delta tier re-ships. Writing 0 for the rows whose hash cannot be sourced is the honest choice - it can
-        // never be mistaken for a verified hash.
+        // Every row carries the vendor's 64 bit content hash. The vendor's own index has a non-zero hash in all
+        // 232,450 rows, and the game verifies resources by it - an index full of zeros is what made a complete
+        // 66 GB installation look broken and re-download itself (measured 2026-10-26).
         //
-        // The shader tier is different: shadercachelist_dx12.txt carries the per-resource hash (measured 2026-10-26:
-        // all 173,859 values equal the live ResourceExA.patchinfo), and the base tier can reuse it for the handful of
-        // shader resources the pool also carries.
+        // Two sources, in order of authority:
+        //   1. the remote patch list (common / windows64_common) - matches 232,449 of the vendor's 232,450 rows;
+        //   2. the shader cache list, which covers the shader resources the base pool also carries.
+        // Only a resource neither source knows keeps 0, which is now an edge case rather than the rule.
         Dictionary<string, ulong> knownHashes = [];
         if (shaderCacheList is not null)
         {
             foreach (NeteaseGamesShaderResource resource in shaderCacheList.Resources.Values)
             {
                 knownHashes[resource.Path] = resource.Hash;
+            }
+        }
+
+        if (plan.RemotePatchList is { } patchList)
+        {
+            foreach ((string path, NeteaseGamesFileEntry entry) in patchList.LooseFiles)
+            {
+                knownHashes[path] = entry.Hash;
             }
         }
 
@@ -1530,8 +1563,12 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
             {
                 RelativePath = NeteaseGamesContentEndpoints.GetBigPatchContentPath(
                     loose.SourceVersion, loose.Chunk.Section, loose.Chunk.Name),
+                // They live inside LocalData\Patch, next to the shards - not at the game root. Measured 2026-10-26
+                // against the official installation: `prerequisite`, `Misc/lazycode_zstd_dict` and the 4a blob are
+                // all under LocalData\Patch there, while this planner used to drop them at the root, where the game
+                // never looks for them.
                 TargetRelativePath = loose.Chunk.Paths[0].Replace('/', Path.DirectorySeparatorChar),
-                Kind = NeteaseGamesDownloadKind.LooseFile,
+                Kind = NeteaseGamesDownloadKind.BaseFile,
                 ExpectedSize = loose.Chunk.Size,
                 Hosts = NeteaseGamesContentEndpoints.GetBigPatchHosts(),
                 RequiresSignature = false

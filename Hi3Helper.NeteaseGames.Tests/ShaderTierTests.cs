@@ -148,8 +148,13 @@ public class ShaderTierTests
     ///     <c>info1</c>); reading one with the other's table name must not silently return an empty index.
     /// </summary>
     [Fact]
-    public void IndexReader_NeedsTheMatchingTableName()
+    public void ShaderIndex_UsesTheSameTableNameAsTheBaseIndex()
     {
+        // Measured 2026-10-26 on both the vendor's ResourceExA.patchinfo and the plugin's own output: the table is
+        // `info0` with 173,861 rows, not `info1` as an earlier revision assumed.
+        Assert.Equal("info0", NeteaseGamesBaseIndex.ShaderTableName);
+        Assert.Equal(NeteaseGamesBaseIndex.TableName, NeteaseGamesBaseIndex.ShaderTableName);
+
         string directory = Path.Combine(AppContext.BaseDirectory, "scratch", "table" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(directory);
         string path = Path.Combine(directory, "ResourceExA.patchinfo");
@@ -161,8 +166,9 @@ public class ShaderTierTests
                 [new KeyValuePair<string, string>("max_index", "0")]);
         }
 
-        Assert.NotNull(NeteaseGamesBaseIndex.Read(path, NeteaseGamesBaseIndex.ShaderTableName));
-        Assert.Null(NeteaseGamesBaseIndex.Read(path, NeteaseGamesBaseIndex.TableName));
+        NeteaseGamesBaseIndex? index = NeteaseGamesBaseIndex.Read(path, NeteaseGamesBaseIndex.ShaderTableName);
+        Assert.NotNull(index);
+        Assert.Equal(1, index!.EntryCount);
     }
 
     /// <summary>

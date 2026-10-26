@@ -51,11 +51,15 @@ public sealed class NeteaseGamesBaseIndex
     public const string TableName = "info0";
 
     /// <summary>
-    ///     The table name of the shader tier index (<c>ResourceExA.patchinfo</c>). Measured on 2026-10-26: the live
-    ///     file declares <c>info1(filepath, value)</c>, i.e. the shader tier uses the next table in the same schema
-    ///     rather than reusing <c>info0</c>.
+    ///     The table name of the shader tier index (<c>ResourceExA.patchinfo</c>).
+    ///     <para>
+    ///         It is <c>info0</c> - the same table name the base tier uses. An earlier revision declared
+    ///         <c>info1</c> on the theory that the shader tier would use "the next table in the same schema"; measuring
+    ///         both the vendor's file and the plugin's own output on 2026-10-26 showed <c>info0</c> with 173,861 rows
+    ///         in both. The name is kept as its own constant only so the shader writer states which table it means.
+    ///     </para>
     /// </summary>
-    public const string ShaderTableName = "info1";
+    public const string ShaderTableName = "info0";
 
     private const int SqliteMagicLength = 16;
     private const int PageHeaderSize = 8;

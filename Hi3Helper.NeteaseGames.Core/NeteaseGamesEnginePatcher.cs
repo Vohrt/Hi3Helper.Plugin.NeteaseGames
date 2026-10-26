@@ -177,6 +177,64 @@ public static class NeteaseGamesEnginePatcher
     /// <param name="hosts">The hosts that may serve the payload.</param>
     /// <param name="token">The cancellation token.</param>
     /// <returns>The entries of the file list; an empty list when it could not be downloaded.</returns>
+    /// <summary>
+    ///     Downloads the raw <c>md5_engine.txt</c> so it can be written into the installation.
+    ///     <para>
+    ///         The game itself needs this file: the official installation carries
+    ///         <c>Engine\md5_engine.txt</c> (21,811 bytes, measured 2026-10-26) and the plugin used to download the
+    ///         list only to read it, never to keep it - so a fresh installation was missing the file the game
+    ///         verifies its engine against.
+    ///     </para>
+    /// </summary>
+    /// <param name="client">The HTTP client.</param>
+    /// <param name="looseFileParentDir">The payload directory.</param>
+    /// <param name="hosts">The hosts that may serve it.</param>
+    /// <param name="token">Cancel token.</param>
+    /// <returns>The file content, or <c>null</c> when no host served it.</returns>
+    public static async Task<byte[]?> FetchFileListBytesAsync(
+        HttpClient client,
+        string looseFileParentDir,
+        IReadOnlyList<string> hosts,
+        CancellationToken token)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        ArgumentException.ThrowIfNullOrEmpty(looseFileParentDir);
+
+        string listPath = $"/{looseFileParentDir.TrimStart('/')}/{EngineFileListName}";
+        foreach (string host in hosts)
+        {
+            string url = NeteaseGamesUrlSigner.Sign($"https://{host}{listPath}", DateTimeOffset.UtcNow);
+            try
+            {
+                using HttpResponseMessage response = await client.GetAsync(url, token).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    continue;
+                }
+
+                return await response.Content.ReadAsByteArrayAsync(token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException)
+            {
+                SharedStatic.InstanceLogger?.LogWarning(
+                    "[NeteaseGames] The engine file list of {Host} could not be read: {Msg}", host, ex.Message);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    ///     Parses the engine file list and returns its entries.
+    /// </summary>
+    /// <param name="client">The HTTP client.</param>
+    /// <param name="looseFileParentDir">The payload directory.</param>
+    /// <param name="hosts">The hosts that may serve it.</param>
+    /// <param name="token">Cancel token.</param>
     public static async Task<IReadOnlyList<NeteaseGamesEngineFile>> FetchFileListAsync(
         HttpClient client,
         string looseFileParentDir,

@@ -115,9 +115,16 @@ public static class NeteaseGamesBaseLayoutPlanner
                 continue;
             }
 
-            // Reserve room for the chunk. A chunk that does not fit moves to the next shard; that is the only
-            // decision the layout makes, and it keeps every chunk unbroken.
-            if (layout.ShardCount > 0 && offset > 0 && offset + chunk.Size > ShardCapacity)
+            // Start a new shard only once the current one has already reached the capacity; the chunk that crossed
+            // the line stays where it is and the next one opens the following shard.
+            //
+            // ⚠ This is "place, then check", not "check, then place". The vendor's own shards support it: 117 of
+            // their 125 shards carry more than ShardCapacity bytes and **none** carries exactly that many, i.e. a
+            // shard is full only after the last chunk has been appended, and a chunk is never broken in two.
+            // A "check, then place" planner (which this used to be) keeps every shard under the cap and produces a
+            // different shard count and different boundaries - measured 2026-10-26: 123 shards here vs 125 there,
+            // with **0 of 232,450 resources** landing at the same (shard, offset) as the vendor's.
+            if (layout.ShardCount > 0 && offset >= ShardCapacity)
             {
                 layout.ShardCount++;
                 offset = 0;

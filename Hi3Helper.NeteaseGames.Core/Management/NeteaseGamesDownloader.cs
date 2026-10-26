@@ -31,7 +31,15 @@ public enum NeteaseGamesDownloadKind
     ///     (<c>shadercachelist_dx12.txt</c>). It lives in the patch directory and is written last before the
     ///     version record.
     /// </summary>
-    SideFile
+    SideFile,
+
+    /// <summary>
+    ///     One of the three standalone files the base tier carries outside its shards (<c>prerequisite</c>,
+    ///     <c>Misc/lazycode_zstd_dict</c>, the <c>4a/</c> blob). They belong in <c>LocalData\Patch</c> - the official
+    ///     installation keeps them there, next to the shards, and the game looks for them there (measured
+    ///     2026-10-26).
+    /// </summary>
+    BaseFile
 }
 
 /// <summary>A single object of a download plan.</summary>
@@ -194,6 +202,16 @@ public sealed class NeteaseGamesDownloadPlan
 
     /// <summary>The shader cache list of the round, when it was fetched (it carries the per-resource hash and size).</summary>
     public NeteaseGamesShaderCacheList? ShaderCacheList { get; set; }
+
+    /// <summary>
+    ///     The remote patch list of the round, when it was fetched.
+    ///     <para>
+    ///         Its <c>common</c> / <c>windows64_common</c> sections carry the 64 bit content hash of every resource,
+    ///         which is what the vendor's base index stores in its <c>hash</c> column. Measured 2026-10-26: 232,449
+    ///         of the vendor's 232,450 rows carry exactly the hash this list announces.
+    ///     </para>
+    /// </summary>
+    public NeteaseGamesPatchList? RemotePatchList { get; set; }
 
     /// <summary>The staging directory every object is downloaded into.</summary>
     public string StagingDirectory { get; init; } = string.Empty;
