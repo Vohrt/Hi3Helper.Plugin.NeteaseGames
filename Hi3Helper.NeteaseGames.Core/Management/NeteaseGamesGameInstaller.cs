@@ -340,6 +340,30 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
             WriteShaderIndex(patchDirectory, shaderAssembly, plan.ShaderCacheList);
         }
 
+        // The two tiers - 66 GB of shards and their indexes - are on disk at this point, and they are the part a
+        // retry cannot cheaply redo. Record them now instead of waiting for the delta tier: when the run used to
+        // fail after the tiers but before the record (a single 7.9 MB side file, measured 2026-10-26), the game
+        // found no `patchmd5` on its next start, assumed the base tier was missing and began re-downloading 60 GB
+        // that was already there.
+        //
+        // The delta tier is applied below and writes the record again with the same patch version, so this is the
+        // earlier of two identical commits rather than a different value.
+        if (plan.BaseAssembly is { Steps.Count: > 0 } || plan.ShaderAssembly is { Steps.Count: > 0 })
+        {
+            string patchDirectory = Path.Combine(gamePath, NeteaseGamesPaths.PatchDirectoryRelativePath);
+            // The local patch list is not seeded here: it is one of the delta tier's own objects, so it only exists
+            // once ApplyAsync has moved it into place. See the second commit point there.
+            NeteaseGamesLocalState.WriteInstallVersionRecords(
+                patchDirectory,
+                plan.PatchVersion,
+                plan.LauncherRecord,
+                gamePath,
+                plan.PackageVersion);
+
+            SharedStatic.InstanceLogger?.LogInformation(
+                "[NeteaseGames] Recorded the assembled tiers as version {Version}", plan.PatchVersion);
+        }
+
         NeteaseGamesApplyResult result = await NeteaseGamesUpdateApplier.ApplyAsync(
             _httpClient,
             gamePath,

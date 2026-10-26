@@ -171,19 +171,13 @@ public static class NeteaseGamesUpdateApplier
         //   patchmd5     the official launcher's record - its fourth line is the PATCH version
         // An earlier revision fed the patch version into both, which overwrote 6,521,279 with 6,593,596 and
         // corrupted the launcher's bookkeeping even though Collapse (which reads patchmd5) saw nothing wrong.
+        // `pkgversion` is the BASE PACKAGE version and only a round that genuinely advances it may write it. No
+        // manifest the plugin can read announces that counter, so the plan leaves it 0 and this is a no-op - which
+        // is the point: overwriting a real vendor value with the patch version (what an earlier revision did:
+        // 6,521,279 -> 6,593,596) breaks the official launcher's bookkeeping.
         if (plan.PackageVersion > 0)
         {
-            try
-            {
-                WriteAtomic(Path.Combine(patchDirectory, NeteaseGamesPaths.PackageVersionFileName),
-                    plan.PackageVersion.ToString());
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                SharedStatic.InstanceLogger?.LogError(
-                    "[NeteaseGames] Could not write the package version: {Msg}", ex.Message);
-                return NeteaseGamesApplyResult.ApplyFailed(NeteaseGamesPaths.PackageVersionFileName);
-            }
+            NeteaseGamesLocalState.WritePackageVersionIfKnown(patchDirectory, plan.PackageVersion);
         }
 
         if (plan.PatchVersion > 0)

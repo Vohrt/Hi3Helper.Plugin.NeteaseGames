@@ -736,6 +736,75 @@ public sealed class NeteaseGamesLocalState
     /// <param name="version">The version that was installed.</param>
     /// <param name="manifest">The remote manifest the installation was brought to (may be null).</param>
     /// <param name="gameDirectory">The root of the installation (used for the client's own files).</param>
+    /// <summary>
+    ///     Writes the version records that a fresh installation needs, as soon as the tiers are on disk.
+    ///     <para>
+    ///         <b>Why this runs before the delta tier.</b> The records used to be written only after every object of
+    ///         the whole plan had succeeded. When a 60 GB base tier and the shader tier were already assembled and a
+    ///         single 7.9 MB side file then failed, the run aborted with <i>no</i> record at all - and the game, on
+    ///         its next start, found no <c>patchmd5</c>, decided the base tier was missing and began re-downloading
+    ///         60 GB (measured 2026-10-26). The tiers are the expensive part and they are complete at this point, so
+    ///         recording them is the honest thing to do; the delta tier advances the patch counter afterwards.
+    ///     </para>
+    ///     <para>
+    ///         <b><c>pkgversion</c>.</b> It is written only when the caller supplies a real value. The base package
+    ///         version is not announced by any manifest the plugin can read (probed 2026-10-26: the content host
+    ///         directories and every plausible <c>pl/*</c> name answer 404, the mini pack's
+    ///         <c>latest_pkgversion</c> is a different counter), so inventing one would corrupt the vendor's
+    ///         bookkeeping exactly as the earlier "write the patch version into pkgversion" bug did. An existing
+    ///         file is never overwritten with a placeholder.
+    ///     </para>
+    /// </summary>
+    /// <param name="patchDirectory">The <c>LocalData\Patch</c> directory.</param>
+    /// <param name="patchVersion">The patch version the tiers were installed from (line 3 of the manifest).</param>
+    /// <param name="manifest">The remote manifest (decrypted text) the record is rebuilt from.</param>
+    /// <param name="gameDirectory">The root of the installation.</param>
+    /// <param name="packageVersion">The base package version, or 0 when it is not known.</param>
+    public static void WriteInstallVersionRecords(string patchDirectory, long patchVersion, string? manifest,
+        string gameDirectory, long packageVersion)
+    {
+        if (patchVersion <= 0)
+        {
+            return;
+        }
+
+        WriteLauncherRecord(patchDirectory, patchVersion, manifest, gameDirectory);
+        WritePackageVersionIfKnown(patchDirectory, packageVersion);
+    }
+
+    /// <summary>
+    ///     Writes <c>pkgversion</c> when a real value is known, leaving an existing file alone otherwise.
+    /// </summary>
+    /// <param name="patchDirectory">The <c>LocalData\Patch</c> directory.</param>
+    /// <param name="packageVersion">The base package version, or 0 when it is not known.</param>
+    public static void WritePackageVersionIfKnown(string patchDirectory, long packageVersion)
+    {
+        if (packageVersion <= 0)
+        {
+            return;
+        }
+
+        try
+        {
+            string path = Path.Combine(patchDirectory, NeteaseGamesPaths.PackageVersionFileName);
+            string temporary = path + ".tmp";
+            File.WriteAllText(temporary, packageVersion.ToString(CultureInfo.InvariantCulture));
+            File.Move(temporary, path, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            SharedStatic.InstanceLogger?.LogWarning(
+                "[NeteaseGames] Could not write the package version: {Msg}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    ///     Writes the launcher's own record (<c>patchmd5_windows64_normal.txt</c>) and refreshes the client's files.
+    /// </summary>
+    /// <param name="patchDirectory">The <c>LocalData\Patch</c> directory.</param>
+    /// <param name="version">The version that was installed.</param>
+    /// <param name="manifest">The remote manifest the installation was brought to (may be null).</param>
+    /// <param name="gameDirectory">The root of the installation.</param>
     public static void WriteLauncherRecord(string patchDirectory, long version, string? manifest, string gameDirectory)
     {
         if (version <= 0)
