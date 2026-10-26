@@ -14,16 +14,25 @@ namespace Hi3Helper.NeteaseGames.Core.Management;
 ///         live run showed on 2026-10-26: the bar oscillating between 5 MB and 9 MB out of 66 GB, and going backwards.
 ///     </para>
 ///     <para>
-///         A run has three byte-producing phases that report in different shapes:
+///         A run has three phases that report in different shapes:
 ///     </para>
 ///     <list type="number">
 ///         <item>the base tier assembly - one callback per finished chunk, carrying that chunk's size;</item>
 ///         <item>the shader tier assembly - the same;</item>
-///         <item>the delta download - one callback per write, carrying the running total of that phase.</item>
+///         <item>the delta download - one callback per write, carrying the running total of that phase, plus one
+///             callback per finished object.</item>
 ///     </list>
 ///     <para>
 ///         This type absorbs all three: deltas are added, absolute phase values are converted to deltas, and the result
 ///         is always a single total that never decreases.
+///     </para>
+///     <para>
+///         <b>The object count.</b> It is reported against the plan's item count, so only work that the plan actually
+///         lists may advance it. The two assemblies download ~11,000 chunks that the host does not see as items (they
+///         are one work unit for the user, the tier itself), so their chunk callbacks add bytes but not count - see
+///         <see cref="AddAssemblyChunk" />. Without that split the "N / M" badge jumped to its maximum in the first
+///         seconds, and simply not counting anything at all left it at "0 / 342" for the whole run (both observed
+///         live on 2026-10-26).
 ///     </para>
 /// </summary>
 public sealed class NeteaseGamesProgressTracker
@@ -85,25 +94,35 @@ public sealed class NeteaseGamesProgressTracker
     }
 
     /// <summary>
-    ///     Adds the bytes of one finished object (the assemblers report this way).
-    ///     <para>
-    ///         The object count is deliberately left alone: the assemblers finish ~11,000 chunks while the plan has
-    ///         ~340 items, so counting chunks would make the "N / M" badge jump to its maximum in the first seconds.
-    ///         The count is set by <see cref="Complete" /> instead, which is what the previous code effectively did
-    ///         (it reported 0 during the download and the total at the end).
-    ///     </para>
+    ///     Adds the bytes of one finished object (the assemblers report this way) and counts it as one work unit.
     /// </summary>
     /// <param name="bytes">The size of the object that just finished.</param>
-    public void AddDelta(long bytes)
+    /// <param name="units">How many work units that object stands for (one, unless a resumed prefix is folded in).</param>
+    public void AddDelta(long bytes, int units = 1)
     {
-        if (bytes <= 0)
+        if (bytes <= 0 && units <= 0)
         {
             return;
         }
 
         lock (_gate)
         {
-            _bytes += bytes;
+            _bytes += Math.Max(0, bytes);
+            _count += Math.Max(0, units);
+        }
+
+        Report();
+    }
+
+    /// <summary>
+    ///     Counts one finished work unit without adding bytes (the delta downloader reports bytes as a running total,
+    ///     but finishes its objects one at a time).
+    /// </summary>
+    public void AddCompletedUnit()
+    {
+        lock (_gate)
+        {
+            _count++;
         }
 
         Report();

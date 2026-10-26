@@ -38,6 +38,7 @@ public static class NeteaseGamesUpdateApplier
     /// <param name="plan">The plan that lists every object that has to be downloaded.</param>
     /// <param name="downloader">The downloader that performs the transfers.</param>
     /// <param name="progress">Reports the number of bytes that are already on disk.</param>
+    /// <param name="completed">Called once per object that finished downloading.</param>
     /// <param name="token">Cancel token.</param>
     /// <returns>The result of the operation.</returns>
     public static async Task<NeteaseGamesApplyResult> ApplyAsync(
@@ -46,7 +47,8 @@ public static class NeteaseGamesUpdateApplier
         NeteaseGamesDownloadPlan plan,
         NeteaseGamesDownloader downloader,
         Action<long>? progress,
-        CancellationToken token)
+        CancellationToken token,
+        Action? completed = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
         ArgumentNullException.ThrowIfNull(plan);
@@ -63,7 +65,7 @@ public static class NeteaseGamesUpdateApplier
         // Download everything first. A failure here leaves the installation untouched. The transfers are
         // overlapped: a fresh installation is tens of gigabytes and a serial loop would take much longer.
         IReadOnlyList<NeteaseGamesDownloadItem> failed = await downloader
-            .DownloadAllAsync(plan.Items, NeteaseGamesDownloader.DefaultParallelism, progress, token)
+            .DownloadAllAsync(plan.Items, NeteaseGamesDownloader.DefaultParallelism, progress, token, completed)
             .ConfigureAwait(false);
 
         if (failed.Count > 0)

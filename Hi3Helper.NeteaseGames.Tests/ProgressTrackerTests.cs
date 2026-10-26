@@ -107,20 +107,61 @@ public class ProgressTrackerTests
     }
 
     /// <summary>
-    ///     The reported count stays at 0 while the assemblers work (they finish ~11,000 chunks while the plan has
-    ///     ~340 items, so counting them would max out the "N / M" badge in the first seconds) and reaches the total
-    ///     only when the run completes.
+    ///     Every finished object advances the count, including the assembled chunks: a fresh installation downloads
+    ///     ~11,000 chunks and 342 plan items, and the badge has to move during the assembly (it sat at "0 / 342" for
+    ///     the whole first phase when only plan items were counted).
     /// </summary>
     [Fact]
-    public void Count_OnlyReachesTheTotalWhenComplete()
+    public void AddDelta_AdvancesTheCount()
+    {
+        Recorder recorder = new();
+        NeteaseGamesProgressTracker tracker = new(recorder.Callback, totalBytes: 1000, totalCount: 3);
+
+        tracker.AddDelta(100);
+        tracker.AddDelta(100);
+
+        Assert.Equal([1, 2], recorder.Counts);
+    }
+
+    /// <summary>
+    ///     A resumed prefix arrives as one callback carrying several bytes and several units, and must land as
+    ///     exactly that many units - otherwise a resumed run's badge starts behind its byte counter.
+    /// </summary>
+    [Fact]
+    public void AddDelta_AcceptsAUnitCountForAResumedPrefix()
+    {
+        Recorder recorder = new();
+        NeteaseGamesProgressTracker tracker = new(recorder.Callback, totalBytes: 1000, totalCount: 10);
+
+        tracker.AddDelta(500, units: 6);
+        tracker.AddDelta(100, units: 1);
+
+        Assert.Equal([6, 7], recorder.Counts);
+        Assert.Equal([500L, 600L], recorder.Bytes);
+    }
+
+    /// <summary>The delta downloader reports bytes separately, so its completion callback only moves the count.</summary>
+    [Fact]
+    public void AddCompletedUnit_CountsWithoutBytes()
+    {
+        Recorder recorder = new();
+        NeteaseGamesProgressTracker tracker = new(recorder.Callback, totalBytes: 1000, totalCount: 3);
+
+        tracker.AddCompletedUnit();
+        tracker.AddCompletedUnit();
+
+        Assert.Equal([1, 2], recorder.Counts);
+        Assert.Equal([0L, 0L], recorder.Bytes);
+    }
+
+    /// <summary>Completion lands both counters on their maximum.</summary>
+    [Fact]
+    public void Complete_ReachesBothMaximums()
     {
         Recorder recorder = new();
         NeteaseGamesProgressTracker tracker = new(recorder.Callback, totalBytes: 1000, totalCount: 342);
 
         tracker.AddDelta(100);
-        tracker.AddDelta(100);
-        Assert.All(recorder.Counts, c => Assert.Equal(0, c));
-
         tracker.Complete();
 
         Assert.Equal(1000, recorder.Bytes[^1]);

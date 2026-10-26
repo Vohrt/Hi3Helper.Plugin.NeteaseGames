@@ -214,6 +214,20 @@ public sealed class NeteaseGamesDownloadPlan
                            (BaseAssembly is null || BaseAssembly.Steps.Count == 0) &&
                            (ShaderAssembly is null || ShaderAssembly.Steps.Count == 0);
 
+    /// <summary>
+    ///     The number of objects the run actually downloads: every assembled chunk plus every plan item.
+    ///     <para>
+    ///         This is the denominator of the host's "N / M" badge. It deliberately counts chunks: the two tier
+    ///         assemblies download ~11,000 of them and take the overwhelming majority of a fresh installation, so
+    ///         reporting only <see cref="Items" /> (342) left the badge at "0 / 342" for the whole assembly phase
+    ///         (measured 2026-10-26).
+    ///     </para>
+    /// </summary>
+    public int TotalWorkUnits
+        => Items.Count +
+           (BaseAssembly?.Steps.Count ?? 0) +
+           (ShaderAssembly?.Steps.Count ?? 0);
+
     /// <summary>The number of bytes that are already on disk.</summary>
     public long DownloadedSize => Interlocked.Read(ref _downloaded);
 
@@ -308,9 +322,18 @@ public sealed class NeteaseGamesDownloadPlan
         int index = 0;
         foreach (NeteaseGamesDownloadItem item in Items)
         {
+            // A staged path must never be empty: the downloader opens the file and the applier moves it, and an
+            // empty path turns into ArgumentException("path") - which on a 60 GB run happens only at the very end.
+            // A side file whose target name is empty borrows the last segment of its remote path instead.
+            string name = Path.GetFileName(item.TargetRelativePath);
+            if (string.IsNullOrEmpty(name))
+            {
+                name = Path.GetFileName(item.RelativePath);
+            }
+
             // The staged name is an ordinal, so two objects with the same file name (a package and its index
             // often share the stem) can never overwrite each other while they are being downloaded.
-            item.StagedPath = Path.Combine(stagingDirectory, $"{index:D6}_{Path.GetFileName(item.TargetRelativePath)}");
+            item.StagedPath = Path.Combine(stagingDirectory, $"{index:D6}_{name}");
             index++;
         }
     }
@@ -627,7 +650,8 @@ public sealed class NeteaseGamesDownloader
         IReadOnlyList<NeteaseGamesDownloadItem> items,
         int parallelism,
         Action<long>? progress,
-        CancellationToken token)
+        CancellationToken token,
+        Action? completed = null)
     {
         ArgumentNullException.ThrowIfNull(items);
 
@@ -698,7 +722,11 @@ public sealed class NeteaseGamesDownloader
                     {
                         failed.Add(item);
                     }
+
+                    return;
                 }
+
+                completed?.Invoke();
             }).ConfigureAwait(false);
 
         return failed;

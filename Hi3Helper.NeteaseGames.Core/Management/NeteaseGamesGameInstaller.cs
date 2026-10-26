@@ -256,7 +256,10 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
         progressStateDelegate?.Invoke(InstallProgressState.Download);
 
         long totalBytes = plan.TotalSize;
-        int totalFiles = plan.Items.Count;
+
+        // The badge counts real downloads, not plan rows: a fresh installation is ~11,000 assembled chunks plus
+        // 342 plan items, and the chunks are what the user waits for.
+        int totalFiles = plan.TotalWorkUnits;
 
         // One cumulative counter for the whole run. The host computes the percentage and the speed from
         // DownloadedBytes alone, so every phase has to feed the same monotonically increasing total: the assemblers
@@ -292,6 +295,7 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
                 downloader,
                 progress.AddDelta,
                 token).ConfigureAwait(false);
+
 
             if (failedChunk is not null)
             {
@@ -342,7 +346,8 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
             plan,
             downloader,
             progress.SetAbsolute,
-            token).ConfigureAwait(false);
+            token,
+            progress.AddCompletedUnit).ConfigureAwait(false);
 
         if (!result.IsSuccess)
         {
@@ -585,7 +590,10 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
             }
         }
 
-        plan.AssignStaging(stagingDirectory);
+        // ⚠ AssignStaging must run AFTER every item has been added. It used to run here, before the base tier's
+        // loose chunks were appended below, so those three items kept an empty StagedPath - and the downloader's
+        // Path.GetDirectoryName("") threw ArgumentException at the very end of a 60 GB run (measured 2026-10-26).
+        // The call now sits right before the plan is returned.
 
         // A fresh installation needs the base tier (Patch.mpk + Patch1..127) and the shader tier
         // (ResourceExA*), both assembled from the big_common / big_shader chunk pool.
@@ -654,6 +662,10 @@ public partial class NeteaseGamesGameInstaller : GameInstallerBase
                 }
             }
         }
+
+        // Every item exists by now (the base tier appends its loose chunks and the shader tier adds none), so the
+        // staged paths can be assigned in one pass.
+        plan.AssignStaging(stagingDirectory);
 
         SharedStatic.InstanceLogger?.LogInformation(
             "[NeteaseGames] Plan ({Mode}): {Packages} packages, {Indexes} indexes, {Size} bytes",

@@ -147,7 +147,10 @@ public static class NeteaseGamesBaseAssembler
     /// <param name="shardDirectory">The directory the shard files are written to.</param>
     /// <param name="stagingDirectory">The directory a chunk is downloaded into.</param>
     /// <param name="downloader">The downloader.</param>
-    /// <param name="progress">Called with the number of bytes finished so far.</param>
+    /// <param name="progress">
+    ///     Called as (bytes, units) after each finished chunk: the bytes that chunk contributed and how many work
+    ///     units it stands for. A resumed prefix is reported once with its whole byte count and chunk count.
+    /// </param>
     /// <param name="token">Cancel token.</param>
     /// <param name="shardFileName">
     ///     Names the shard file of a shard index. The base tier and the shader tier use different prefixes
@@ -159,7 +162,7 @@ public static class NeteaseGamesBaseAssembler
         string shardDirectory,
         string stagingDirectory,
         NeteaseGamesDownloader downloader,
-        Action<long>? progress,
+        Action<long, int>? progress,
         CancellationToken token,
         Func<int, string>? shardFileName = null)
     {
@@ -221,7 +224,7 @@ public static class NeteaseGamesBaseAssembler
         string shardDirectory,
         string stagingDirectory,
         NeteaseGamesDownloader downloader,
-        Action<long>? progress,
+        Action<long, int>? progress,
         CancellationToken token,
         Func<int, string> shardFileName)
     {
@@ -270,15 +273,17 @@ public static class NeteaseGamesBaseAssembler
                     "[NeteaseGames] Base shard {Shard} resumes after {Chunks} chunks ({Bytes} bytes already on disk)",
                     shardIndex, firstMissing, resumeOffset);
 
-                // The chunks that are already there are not downloaded again, so they have to be accounted for here.
-                // Without this a resumed run reported only the remaining bytes and the bar never reached 100 %.
+                // The chunks that are already there are not downloaded again, so they have to be accounted for here -
+                // both their bytes and their count. Without this a resumed run reported only the remaining work and
+                // never reached 100 %.
                 long resumedBytes = 0;
                 for (int i = 0; i < firstMissing; i++)
                 {
                     resumedBytes += steps[i].Chunk.Size;
                 }
 
-                progress?.Invoke(resumedBytes);
+                // One callback carrying the whole prefix: the delegate adds the bytes and the units in one go.
+                progress?.Invoke(resumedBytes, firstMissing);
             }
         }
         else
@@ -322,7 +327,7 @@ public static class NeteaseGamesBaseAssembler
             }
 
             TryDelete(chunkPath);
-            progress?.Invoke(size);
+            progress?.Invoke(size, 1);
         }
 
         return null;
